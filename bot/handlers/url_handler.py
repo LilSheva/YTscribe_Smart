@@ -310,6 +310,19 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
     # Сохраняем транскрипт в задачу
     task_data["transcript"] = text
 
+    # --- Автосохранение .md на GDrive ---
+    gdrive_md_url: str | None = None
+    if ENABLE_GDRIVE:
+        try:
+            from utils.md_generator import generate_transcript_md
+            md_path = generate_transcript_md(task, text)
+            gdrive_result = await gdrive.upload_transcript(md_path)
+            gdrive_md_url = gdrive_result.public_url
+            # Удаляем временный .md
+            md_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Автосохранение транскрипта на GDrive: {e}")
+
     # --- Отправка результата ---
     header = f"📝 **Транскрипт: {task.title}**\n\n"
     parts = llm_router.split_for_telegram(header + text)
@@ -318,13 +331,20 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
         await callback.message.answer(part, parse_mode="Markdown")
 
     # Обновляем исходное сообщение
-    await callback.message.edit_text(
-        f"✅ Транскрибация завершена: **{task.title}**\n"
+    status_lines = [
+        f"✅ Транскрибация завершена: **{task.title}**",
         f"📄 {len(text)} символов",
+    ]
+    if gdrive_md_url:
+        status_lines.append(f"☁️ [Транскрипт на GDrive]({gdrive_md_url})")
+
+    await callback.message.edit_text(
+        "\n".join(status_lines),
         parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
-    logger.info(f"Transcript complete: {task.title} ({len(text)} chars)")
+    logger.info(f"Transcript complete: {task.title} ({len(text)} chars), GDrive: {'OK' if gdrive_md_url else 'SKIP'}")
 
 
 @router.callback_query(F.data.startswith("llm_analyze:"))
@@ -411,13 +431,34 @@ async def cb_llm_analyze(callback: CallbackQuery) -> None:
     for part in parts:
         await callback.message.answer(part, parse_mode="Markdown")
 
+    # --- Автосохранение саммари на GDrive ---
+    gdrive_md_url: str | None = None
+    if ENABLE_GDRIVE:
+        try:
+            from utils.md_generator import generate_transcript_md
+            # Сохраняем саммари (транскрипт + саммари вместе)
+            combined = f"{text}\n\n---\n\n## AI Саммари\n\n{result}"
+            md_path = generate_transcript_md(task, combined)
+            gdrive_result = await gdrive.upload_transcript(md_path)
+            gdrive_md_url = gdrive_result.public_url
+            md_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Автосохранение саммари на GDrive: {e}")
+
     # Обновляем исходное сообщение
-    await callback.message.edit_text(
-        f"✅ AI-анализ завершён: **{task.title}**\n"
-        f"📝 Транскрипт: {len(text)} символов\n"
+    status_lines = [
+        f"✅ AI-анализ завершён: **{task.title}**",
+        f"📝 Транскрипт: {len(text)} символов",
         f"🧠 Ответ: {len(result)} символов",
+    ]
+    if gdrive_md_url:
+        status_lines.append(f"☁️ [Документ на GDrive]({gdrive_md_url})")
+
+    await callback.message.edit_text(
+        "\n".join(status_lines),
         parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
-    logger.info(f"LLM analyze complete: {task.title} ({len(result)} chars)")
+    logger.info(f"LLM analyze complete: {task.title} ({len(result)} chars), GDrive: {'OK' if gdrive_md_url else 'SKIP'}")
 
