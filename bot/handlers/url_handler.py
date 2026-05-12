@@ -17,9 +17,11 @@ from aiogram.types import Message, CallbackQuery, FSInputFile
 
 from core.config import features, ENABLE_GDRIVE
 from core.models import MediaTask
-from core.exceptions import ServiceDisabledError, DownloadError, YTSBotError
+from core.exceptions import ServiceDisabledError, DownloadError, TranscriptionError, LLMError, YTSBotError
 from services import downloader
 from services import gdrive
+from services import transcriber
+from services import llm_router
 from bot.keyboards.main_menu import get_media_keyboard, get_post_download_keyboard
 
 router = Router(name="url_handler")
@@ -245,3 +247,177 @@ async def _handle_download(callback: CallbackQuery, format_type: str) -> None:
         f"GDrive: {'OK' if gdrive_url else 'SKIP'}, "
         f"Chat send: {'available' if can_send else 'too large'}"
     )
+
+
+@router.callback_query(F.data.startswith("transcript:"))
+async def cb_transcribe(callback: CallbackQuery) -> None:
+    """Callback: скачивание аудио → транскрибация → текст в чат."""
+    task_id = callback.data.split(":")[1]
+    task_data = _tasks.get(task_id)
+
+    if not task_data:
+        await callback.answer("❌ Задача не найдена. Отправьте ссылку заново.", show_alert=True)
+        return
+
+    url = task_data["url"]
+    task: MediaTask = task_data["task"]
+
+    await callback.answer()
+
+    # Статус: скачиваю аудио
+    await callback.message.edit_text(
+        f"⬇️ Скачиваю аудио **{task.title}**...",
+        parse_mode="Markdown",
+    )
+
+    # --- Скачивание M4A ---
+    try:
+        result_task = await downloader.download_media(url, "m4a")
+    except (ServiceDisabledError, DownloadError) as e:
+        await callback.message.edit_text(f"❌ {e.message}")
+        return
+    except Exception as e:
+        logger.error(f"Download for transcript error: {e}")
+        await callback.message.edit_text("❌ Ошибка при скачивании аудио.")
+        return
+
+    file_path = result_task.temp_file_path
+    if not file_path or not file_path.exists():
+        await callback.message.edit_text("❌ Аудиофайл не найден после загрузки.")
+        return
+
+    task_data["file_path"] = file_path
+
+    # Статус: транскрибирую
+    size_mb = file_path.stat().st_size / (1024 * 1024)
+    await callback.message.edit_text(
+        f"📝 Транскрибирую **{task.title}** ({size_mb:.1f} MB)...\n"
+        f"Это может занять 30–120 секунд.",
+        parse_mode="Markdown",
+    )
+
+    # --- Транскрибация ---
+    try:
+        text = await transcriber.transcribe(file_path)
+    except (ServiceDisabledError, TranscriptionError) as e:
+        await callback.message.edit_text(f"❌ {e.message}")
+        return
+    except Exception as e:
+        logger.error(f"Transcription error: {e}")
+        await callback.message.edit_text("❌ Ошибка транскрибации.")
+        return
+
+    # Сохраняем транскрипт в задачу
+    task_data["transcript"] = text
+
+    # --- Отправка результата ---
+    header = f"📝 **Транскрипт: {task.title}**\n\n"
+    parts = llm_router.split_for_telegram(header + text)
+
+    for part in parts:
+        await callback.message.answer(part, parse_mode="Markdown")
+
+    # Обновляем исходное сообщение
+    await callback.message.edit_text(
+        f"✅ Транскрибация завершена: **{task.title}**\n"
+        f"📄 {len(text)} символов",
+        parse_mode="Markdown",
+    )
+
+    logger.info(f"Transcript complete: {task.title} ({len(text)} chars)")
+
+
+@router.callback_query(F.data.startswith("llm_analyze:"))
+async def cb_llm_analyze(callback: CallbackQuery) -> None:
+    """Callback: скачивание → транскрибация → LLM анализ → результат в чат."""
+    task_id = callback.data.split(":")[1]
+    task_data = _tasks.get(task_id)
+
+    if not task_data:
+        await callback.answer("❌ Задача не найдена. Отправьте ссылку заново.", show_alert=True)
+        return
+
+    url = task_data["url"]
+    task: MediaTask = task_data["task"]
+
+    await callback.answer()
+
+    # Если транскрипт уже есть — используем его
+    text = task_data.get("transcript")
+
+    if not text:
+        # Скачиваем аудио
+        await callback.message.edit_text(
+            f"⬇️ Скачиваю аудио **{task.title}**...",
+            parse_mode="Markdown",
+        )
+
+        try:
+            result_task = await downloader.download_media(url, "m4a")
+        except (ServiceDisabledError, DownloadError) as e:
+            await callback.message.edit_text(f"❌ {e.message}")
+            return
+        except Exception as e:
+            logger.error(f"Download for LLM error: {e}")
+            await callback.message.edit_text("❌ Ошибка при скачивании аудио.")
+            return
+
+        file_path = result_task.temp_file_path
+        if not file_path or not file_path.exists():
+            await callback.message.edit_text("❌ Аудиофайл не найден после загрузки.")
+            return
+
+        task_data["file_path"] = file_path
+
+        # Транскрибируем
+        size_mb = file_path.stat().st_size / (1024 * 1024)
+        await callback.message.edit_text(
+            f"📝 Транскрибирую **{task.title}** ({size_mb:.1f} MB)...",
+            parse_mode="Markdown",
+        )
+
+        try:
+            text = await transcriber.transcribe(file_path)
+            task_data["transcript"] = text
+        except (ServiceDisabledError, TranscriptionError) as e:
+            await callback.message.edit_text(f"❌ {e.message}")
+            return
+        except Exception as e:
+            logger.error(f"Transcription for LLM error: {e}")
+            await callback.message.edit_text("❌ Ошибка транскрибации.")
+            return
+
+    # --- LLM анализ ---
+    await callback.message.edit_text(
+        f"🧠 AI анализирует **{task.title}**...\n"
+        f"Модель обрабатывает {len(text)} символов.",
+        parse_mode="Markdown",
+    )
+
+    try:
+        result = await llm_router.analyze(text)
+    except (ServiceDisabledError, LLMError) as e:
+        await callback.message.edit_text(f"❌ {e.message}")
+        return
+    except Exception as e:
+        logger.error(f"LLM analyze error: {e}")
+        await callback.message.edit_text("❌ Ошибка при AI-анализе.")
+        return
+
+    # --- Отправка результата ---
+    header = f"🧠 **AI Саммари: {task.title}**\n\n"
+    parts = llm_router.split_for_telegram(header + result)
+
+    for part in parts:
+        await callback.message.answer(part, parse_mode="Markdown")
+
+    # Обновляем исходное сообщение
+    await callback.message.edit_text(
+        f"✅ AI-анализ завершён: **{task.title}**\n"
+        f"📝 Транскрипт: {len(text)} символов\n"
+        f"🧠 Ответ: {len(result)} символов",
+        parse_mode="Markdown",
+    )
+
+    logger.info(f"LLM analyze complete: {task.title} ({len(result)} chars)")
+
