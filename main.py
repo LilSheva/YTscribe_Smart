@@ -16,6 +16,7 @@ from aiogram.client.default import DefaultBotProperties
 from core.config import BOT_TOKEN, TEMP_DIR, LOG_LEVEL
 from core.logger import setup_logging
 from bot.handlers.start import router as start_router
+from bot.handlers.url_handler import router as url_router
 
 # Инициализация логгера
 setup_logging(level=LOG_LEVEL)
@@ -94,6 +95,7 @@ async def main() -> None:
 
     # Регистрация роутеров
     dp.include_router(start_router)
+    dp.include_router(url_router)
 
     # Lifecycle hooks
     dp.startup.register(on_startup)
