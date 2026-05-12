@@ -28,8 +28,8 @@
 ## 📦 Бэклог (Будущие фазы)
 
 **Фаза 2: Smart Processing (Транскрибация и LLM)**
-- [ ] Интеграция `groq` Whisper API (`services/transcriber.py`).
-- [ ] Логика нарезки больших аудио (> 25МБ) через `ffmpeg`.
+- [x] Интеграция Whisper API: Groq (основной) + OmniRoute (fallback), выбор модели.
+- [x] Логика нарезки больших аудио (> 25МБ) через `ffmpeg` (`utils/media_chunker.py`).
 - [ ] Интеграция Omniroute / Kiro AI (Claude/Haiku) в `services/llm_router.py`.
 
 **Фаза 3: Storage & Knowledge Base (Память)**

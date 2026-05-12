@@ -40,6 +40,12 @@ BOT_TOKEN: str = _get_env("BOT_TOKEN")
 # === API Keys ===
 GROQ_API_KEY: str = _get_env("GROQ_API_KEY")
 OMNIROUTE_API_KEY: str = _get_env("OMNIROUTE_API_KEY")
+OMNIROUTE_BASE_URL: str = _get_env("OMNIROUTE_BASE_URL", "https://omniroute.up.railway.app/v1")
+
+# === Транскрибация ===
+TRANSCRIPTION_PROVIDER: str = _get_env("TRANSCRIPTION_PROVIDER", "groq")
+WHISPER_MODEL: str = _get_env("WHISPER_MODEL", "whisper-large-v3-turbo")
+WHISPER_MAX_FILE_MB: int = int(_get_env("WHISPER_MAX_FILE_MB", "25"))
 
 # === Google Drive ===
 GDRIVE_CREDENTIALS_PATH: str = _get_env("GDRIVE_CREDENTIALS_PATH", "credentials/gdrive_service.json")

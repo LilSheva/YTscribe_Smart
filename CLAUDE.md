@@ -7,7 +7,7 @@
 - **Язык:** Python 3.11+ (строгая асинхронность)
 - **Бот:** `aiogram` 3.x (роутеры, FSM, Inline-меню)
 - **Медиа:** `yt-dlp` (метаданные, загрузка), `ffmpeg` (локальная нарезка)
-- **AI & LLM:** `groq` (Whisper API), `httpx` (Kiro AI / Omniroute)
+- **AI & LLM:** `groq` (Whisper API — основной), `httpx` (Omniroute — fallback транскрибации + LLM роутер)
 - **Хранилище:** `chromadb` (векторы), `google-api-python-client` (GDrive)
 
 ## Структура проекта
