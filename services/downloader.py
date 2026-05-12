@@ -157,8 +157,23 @@ async def get_info(url: str) -> MediaTask:
         url=url,
         title=info.get("title", "Неизвестно"),
         channel=info.get("channel", info.get("uploader", "Неизвестно")),
+        channel_id=info.get("channel_id", ""),
+        channel_url=info.get("channel_url", ""),
         duration_sec=int(info.get("duration", 0)),
         thumbnail_url=info.get("thumbnail", ""),
+        view_count=info.get("view_count"),
+        like_count=info.get("like_count"),
+        comment_count=info.get("comment_count"),
+        video_id=info.get("id", ""),
+        upload_date=info.get("upload_date", ""),
+        description=info.get("description", ""),
+        categories=info.get("categories", []) or [],
+        tags=info.get("tags", []) or [],
+        language=info.get("language", ""),
+        age_limit=int(info.get("age_limit", 0)),
+        live_status=info.get("live_status", ""),
+        availability=info.get("availability", ""),
+        chapters=info.get("chapters", []) or [],
     )
 
     logger.info(f"Метаданные: [{task.channel}] {task.title} ({task.duration_formatted})")

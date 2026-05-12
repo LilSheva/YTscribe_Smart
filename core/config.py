@@ -49,6 +49,8 @@ WHISPER_MAX_FILE_MB: int = int(_get_env("WHISPER_MAX_FILE_MB", "25"))
 
 # === Google Drive ===
 GDRIVE_CREDENTIALS_PATH: str = _get_env("GDRIVE_CREDENTIALS_PATH", "credentials/gdrive_service.json")
+GDRIVE_MEDIA_FOLDER_ID: str = _get_env("GDRIVE_MEDIA_FOLDER_ID")
+GDRIVE_TRANSCRIPTS_FOLDER_ID: str = _get_env("GDRIVE_TRANSCRIPTS_FOLDER_ID")
 
 # === Media ===
 BROWSER_FOR_COOKIES: str = _get_env("BROWSER_FOR_COOKIES", "chrome")
@@ -58,8 +60,12 @@ TEMP_DIR: Path = BASE_DIR / _get_env("TEMP_DIR", "temp")
 ENABLE_DOWNLOADER: bool = _get_bool("ENABLE_DOWNLOADER", default=True)
 ENABLE_TRANSCRIPT: bool = _get_bool("ENABLE_TRANSCRIPT", default=True)
 ENABLE_LLM: bool = _get_bool("ENABLE_LLM", default=True)
-ENABLE_DB: bool = _get_bool("ENABLE_DB", default=True)
-ENABLE_GDRIVE: bool = _get_bool("ENABLE_GDRIVE", default=False)
+ENABLE_DB: bool = _get_bool("ENABLE_DB", default=False)
+ENABLE_KB: bool = _get_bool("ENABLE_KB", default=False)
+ENABLE_GDRIVE: bool = _get_bool("ENABLE_GDRIVE", default=True)
+
+# === Knowledge Base (внешний сервис) ===
+KB_API_URL: str = _get_env("KB_API_URL")
 
 # === LLM Settings ===
 LLM_MODEL: str = _get_env("LLM_MODEL", "claude-3-5-sonnet-20241022")
@@ -76,7 +82,7 @@ class FeatureConfig:
     downloader: bool = ENABLE_DOWNLOADER
     transcript: bool = ENABLE_TRANSCRIPT
     llm: bool = ENABLE_LLM
-    db: bool = ENABLE_DB
+    db: bool = ENABLE_KB
     gdrive: bool = ENABLE_GDRIVE
 
     def summary(self) -> str:
@@ -85,7 +91,7 @@ class FeatureConfig:
             "DOWNLOADER": self.downloader,
             "TRANSCRIPT": self.transcript,
             "LLM": self.llm,
-            "DB (ChromaDB)": self.db,
+            "KB (внешняя)": self.db,
             "GDRIVE": self.gdrive,
         }
         lines = [f"  {'✅' if v else '❌'} {k}" for k, v in flags.items()]

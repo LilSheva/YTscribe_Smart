@@ -32,10 +32,10 @@
 - [x] Логика нарезки больших аудио (> 25МБ) через `ffmpeg` (`utils/media_chunker.py`).
 - [ ] Интеграция Omniroute / Kiro AI (Claude/Haiku) в `services/llm_router.py`.
 
-**Фаза 3: Storage & Knowledge Base (Память)**
-- [ ] Локальная векторная база ChromaDB (`services/knowledge_base.py`).
-- [ ] Автоматический чанкинг транскриптов.
-- [ ] Тихая загрузка файлов через Google Drive API (`services/gdrive.py`).
+**Фаза 3: Storage & Export (GDrive + .md)**
+- [x] Автосохранение транскриптов как .md на GDrive (полные метаданные yt-dlp).
+- [x] Раздельные папки: медиа (`GDRIVE_MEDIA_FOLDER_ID`) и транскрипты (`GDRIVE_TRANSCRIPTS_FOLDER_ID`).
+- [x] Замена ChromaDB → внешняя KB (`ENABLE_KB`, `KB_API_URL` — на будущее).
 
 **Фаза 4: Export & Polish**
 - [ ] Генерация `.md` отчетов с саммари.

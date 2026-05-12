@@ -8,7 +8,7 @@
 - **Бот:** `aiogram` 3.x (роутеры, FSM, Inline-меню)
 - **Медиа:** `yt-dlp` (метаданные, загрузка), `ffmpeg` (локальная нарезка)
 - **AI & LLM:** `groq` (Whisper API — основной), `httpx` (Omniroute — fallback транскрибации + LLM роутер)
-- **Хранилище:** `chromadb` (векторы), `google-api-python-client` (GDrive)
+- **Хранилище:** `google-api-python-client` (GDrive — медиа + транскрипты), внешняя KB (API, на будущее)
 
 ## Структура проекта
 - `main.py` — Точка входа бота.
@@ -20,12 +20,12 @@
   - `handlers/` — Обработка команд.
   - `keyboards/` — Динамические меню (зависят от Feature Toggles).
 - `services/` — Слой бизнес-логики:
-  - `downloader.py` (yt-dlp), `transcriber.py` (Groq), `llm_router.py` (Omniroute), `knowledge_base.py` (ChromaDB), `gdrive.py`.
+  - `downloader.py` (yt-dlp), `transcriber.py` (Groq), `llm_router.py` (Omniroute), `gdrive.py` (GDrive upload).
 - `utils/` — Хелперы (генерация MD, чанкинг текста).
 
 ## Ключевые сущности (Data Models)
 - `MediaTask`: url, title, duration_sec, temp_file_path.
-- `FeatureConfig`: Статус модулей (DOWNLOADER, TRANSCRIPT, LLM, DB).
+- `FeatureConfig`: Статус модулей (DOWNLOADER, TRANSCRIPT, LLM, KB, GDRIVE).
 
 ## Правила написания кода (Strict Rules)
 1. **Feature Toggles:** Вся функциональность зависит от флагов в `config.py` (например, `config.ENABLE_TRANSCRIPT`). Если флаг `False`, кнопки этого модуля **не должны** рендериться в клавиатурах, а вызовы функций должны возвращать ошибку/заглушку.
