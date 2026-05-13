@@ -1,96 +1,96 @@
 @echo off
-chcp 65001 >nul
-title YTS_bot — Запуск OmniRoute + Бот
+chcp 65001 >nul 2>&1
+setlocal enabledelayedexpansion
+title YTS_bot - Run
 
 echo ============================================
-echo   YTS_bot — Проверка и запуск
+echo   YTS_bot - Pre-flight checks
 echo ============================================
 echo.
 
-:: --- Проверка Node.js ---
+:: --- Check Node.js ---
 echo [1/6] Node.js...
 where node >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo    X Node.js не найден! Запустите install_omniroute.bat
+    echo    [X] Node.js not found! Run install_omniroute.bat first.
     pause
     exit /b 1
 )
 for /f "tokens=*" %%i in ('node --version') do echo    [OK] %%i
 
-:: --- Проверка Python ---
+:: --- Check Python ---
 echo.
 echo [2/6] Python...
 where python >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo    X Python не найден! Установите Python 3.11+
+    echo    [X] Python not found! Install Python 3.11-3.13.
     pause
     exit /b 1
 )
 for /f "tokens=*" %%i in ('python --version') do echo    [OK] %%i
 
-:: --- Проверка ffmpeg ---
+:: --- Check ffmpeg ---
 echo.
 echo [3/6] ffmpeg...
 where ffmpeg >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo    X ffmpeg не найден в PATH!
-    echo       Скачайте: https://ffmpeg.org/download.html
-    echo       Добавьте в PATH системы.
+    echo    [X] ffmpeg not found in PATH!
+    echo       Download: https://ffmpeg.org/download.html
+    echo       Add bin folder to system PATH.
     pause
     exit /b 1
 )
-echo    [OK] ffmpeg найден
+echo    [OK] ffmpeg found
 
-:: --- Проверка .env ---
+:: --- Check .env ---
 echo.
-echo [4/6] Файл .env...
+echo [4/6] .env file...
 if not exist ".env" (
-    echo    X .env не найден!
-    echo       Скопируйте: copy .env.example .env
-    echo       Заполните API-ключи.
+    echo    [X] .env not found!
+    echo       Run: copy .env.example .env
+    echo       Then fill in your API keys.
     pause
     exit /b 1
 )
-echo    [OK] .env найден
+echo    [OK] .env found
 
-:: --- Проверка venv и зависимостей ---
+:: --- Check venv ---
 echo.
 echo [5/6] Python venv...
 if not exist "venv\Scripts\activate.bat" (
-    echo    [!] venv не найден, создаю...
+    echo    [!] venv not found, creating...
     python -m venv venv
     call venv\Scripts\activate.bat
     pip install -r requirements.txt
 ) else (
     call venv\Scripts\activate.bat
-    echo    [OK] venv активирован
+    echo    [OK] venv activated
 )
 
-:: --- Запуск OmniRoute в фоне ---
+:: --- Start OmniRoute ---
 echo.
-echo [6/6] Запуск OmniRoute (фоновый процесс)...
+echo [6/6] Starting OmniRoute (background)...
 start "OmniRoute" /min cmd /c "npx omniroute"
 timeout /t 3 >nul
-echo    [OK] OmniRoute запущен (окно свёрнуто)
+echo    [OK] OmniRoute started (minimized window)
 echo       Dashboard: http://localhost:3000
 
-:: --- Запуск бота ---
+:: --- Start bot ---
 echo.
 echo ============================================
-echo   Запуск YTS_bot...
+echo   Starting YTS_bot...
 echo ============================================
 echo.
-echo   OmniRoute: http://localhost:3000 (фоновое окно)
-echo   Для остановки нажмите Ctrl+C
+echo   OmniRoute: http://localhost:3000
+echo   Press Ctrl+C to stop the bot
 echo.
 echo ---
 
 python main.py
 
-:: --- После завершения ---
+:: --- After exit ---
 echo.
-echo   Бот остановлен.
-echo    OmniRoute всё ещё работает в фоне.
-echo    Закройте окно "OmniRoute" вручную, если нужно.
+echo   Bot stopped.
+echo   Close the OmniRoute window manually if needed.
 echo.
 pause

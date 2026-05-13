@@ -1,65 +1,66 @@
 @echo off
-chcp 65001 >nul
-title YTS_bot — Установка OmniRoute
+chcp 65001 >nul 2>&1
+setlocal enabledelayedexpansion
+title YTS_bot - Install OmniRoute
 
 echo ============================================
-echo   YTS_bot — Установка OmniRoute (AI Gateway)
+echo   YTS_bot - OmniRoute Installation
 echo ============================================
 echo.
 
-:: --- Проверка Node.js ---
-echo [1/4] Проверка Node.js...
+:: --- Check Node.js ---
+echo [1/4] Checking Node.js...
 where node >nul 2>&1
 if %ERRORLEVEL% neq 0 (
     echo.
-    echo    X Node.js НЕ НАЙДЕН!
+    echo    [X] Node.js NOT FOUND!
     echo.
-    echo    Установите Node.js 18+ с официального сайта:
+    echo    Install Node.js 18+ from:
     echo      https://nodejs.org/
     echo.
-    echo    После установки перезапустите этот скрипт.
+    echo    Then re-run this script.
     echo.
     pause
     exit /b 1
 )
 
 for /f "tokens=*" %%i in ('node --version') do set NODE_VER=%%i
-echo    [OK] Node.js найден: %NODE_VER%
+echo    [OK] Node.js: %NODE_VER%
 
-:: --- Проверка npm ---
+:: --- Check npm ---
 echo.
-echo [2/4] Проверка npm...
+echo [2/4] Checking npm...
 where npm >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo    X npm не найден! Переустановите Node.js.
+    echo    [X] npm not found! Reinstall Node.js.
     pause
     exit /b 1
 )
 
 for /f "tokens=*" %%i in ('npm --version') do set NPM_VER=%%i
-echo    [OK] npm найден: v%NPM_VER%
+echo    [OK] npm: v%NPM_VER%
 
-:: --- Проверка npx ---
+:: --- Check npx ---
 echo.
-echo [3/4] Проверка npx...
+echo [3/4] Checking npx...
 where npx >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo    [!] npx не найден, устанавливаю...
+    echo    [!] npx not found, installing...
     npm install -g npx
 )
-echo    [OK] npx доступен
+echo    [OK] npx available
 
-:: --- Установка OmniRoute ---
+:: --- Install OmniRoute ---
 echo.
-echo [4/4] Установка OmniRoute...
-echo    Выполняю: npm install -g omniroute
+echo [4/4] Installing OmniRoute...
+echo    Running: npm install -g omniroute
 echo.
 npm install -g omniroute
 
 if %ERRORLEVEL% neq 0 (
     echo.
-    echo    X Ошибка при установке OmniRoute!
-    echo    Попробуйте запустить этот скрипт от имени Администратора.
+    echo    [X] Error installing OmniRoute!
+    echo    Try running this script as Administrator.
     echo.
     pause
     exit /b 1
@@ -67,15 +68,13 @@ if %ERRORLEVEL% neq 0 (
 
 echo.
 echo ============================================
-echo   OmniRoute успешно установлен!
+echo   OmniRoute installed successfully!
 echo ============================================
 echo.
-echo Теперь можете запустить: run_omniroute.bat
-echo Или вручную: npx omniroute
-echo.
-echo После запуска:
-echo   1. Откроется Dashboard в браузере
-echo   2. Подключите провайдеры (Groq, OpenRouter и др.)
-echo   3. Скопируйте API ключ в .env файл бота
+echo Next steps:
+echo   1. Run: scripts\run_omniroute.bat
+echo   2. Or manually: npx omniroute
+echo   3. Connect providers in the dashboard
+echo   4. Copy API key to .env
 echo.
 pause
