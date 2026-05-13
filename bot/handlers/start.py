@@ -20,7 +20,7 @@ async def cmd_start(message: Message) -> None:
     user_name = message.from_user.first_name if message.from_user else "друг"
     text = (
         f"👋 Привет, {user_name}!\n\n"
-        "Я **YTS_bot** — твой помощник для работы с YouTube-контентом.\n\n"
+        "Я <b>YTS_bot</b> — твой помощник для работы с YouTube-контентом.\n\n"
         "Отправь мне ссылку на видео, и я предложу:\n"
     )
 
@@ -42,7 +42,7 @@ async def cmd_start(message: Message) -> None:
 
     text += "\n\n💡 Используй /help для списка команд."
 
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
     logger.info(f"Пользователь {message.from_user.id} запустил бота")
 
 
@@ -50,7 +50,7 @@ async def cmd_start(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     """Список доступных команд с учётом Feature Toggles."""
     lines: list[str] = [
-        "📖 **Доступные команды:**\n",
+        "<b>📖 Доступные команды:</b>\n",
         "/start — Запустить бота",
         "/help — Показать эту справку",
     ]
@@ -66,7 +66,7 @@ async def cmd_help(message: Message) -> None:
 
     lines.append("\n💬 Или просто отправь ссылку на YouTube!")
 
-    await message.answer("\n".join(lines), parse_mode="Markdown")
+    await message.answer("\n".join(lines), parse_mode="HTML")
     logger.info(f"Пользователь {message.from_user.id} запросил /help")
 
 
