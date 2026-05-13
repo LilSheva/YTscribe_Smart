@@ -18,6 +18,7 @@ from core.config import (
     ENABLE_DOWNLOADER,
     BROWSER_FOR_COOKIES,
     TEMP_DIR,
+    BASE_DIR,
 )
 from core.exceptions import ServiceDisabledError, DownloadError
 from core.models import MediaTask
@@ -44,8 +45,11 @@ def _base_opts() -> dict:
         "no_warnings": True,
         "extract_flat": False,
     }
-    # Cookies из браузера для обхода блокировок
-    if BROWSER_FOR_COOKIES:
+    # Cookies: приоритет — файл cookies.txt, затем браузер
+    cookies_file = BASE_DIR / "cookies.txt"
+    if cookies_file.exists():
+        opts["cookiefile"] = str(cookies_file)
+    elif BROWSER_FOR_COOKIES:
         opts["cookiesfrombrowser"] = (BROWSER_FOR_COOKIES,)
     return opts
 
