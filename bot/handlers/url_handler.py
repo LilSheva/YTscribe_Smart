@@ -74,10 +74,10 @@ async def handle_youtube_url(message: Message) -> None:
     try:
         task = await downloader.get_info(url)
     except ServiceDisabledError as e:
-        await status_msg.edit_text(f"⚠️ {e.message}")
+        await status_msg.edit_text(f"⚠️ {e.message}", parse_mode=None)
         return
     except DownloadError as e:
-        await status_msg.edit_text(f"❌ {e.message}")
+        await status_msg.edit_text(f"❌ {e.message}", parse_mode=None)
         return
     except Exception as e:
         logger.error(f"Unexpected error in get_info: {e}")
@@ -183,7 +183,7 @@ async def _handle_download(callback: CallbackQuery, format_type: str) -> None:
     try:
         result_task = await downloader.download_media(url, format_type)
     except (ServiceDisabledError, DownloadError) as e:
-        await callback.message.edit_text(f"❌ {e.message}")
+        await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
         return
     except Exception as e:
         logger.error(f"Download error: {e}")
@@ -274,7 +274,7 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
     try:
         result_task = await downloader.download_media(url, "m4a")
     except (ServiceDisabledError, DownloadError) as e:
-        await callback.message.edit_text(f"❌ {e.message}")
+        await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
         return
     except Exception as e:
         logger.error(f"Download for transcript error: {e}")
@@ -300,7 +300,7 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
     try:
         text = await transcriber.transcribe(file_path)
     except (ServiceDisabledError, TranscriptionError) as e:
-        await callback.message.edit_text(f"❌ {e.message}")
+        await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
         return
     except Exception as e:
         logger.error(f"Transcription error: {e}")
@@ -375,7 +375,7 @@ async def cb_llm_analyze(callback: CallbackQuery) -> None:
         try:
             result_task = await downloader.download_media(url, "m4a")
         except (ServiceDisabledError, DownloadError) as e:
-            await callback.message.edit_text(f"❌ {e.message}")
+            await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
             return
         except Exception as e:
             logger.error(f"Download for LLM error: {e}")
@@ -400,7 +400,7 @@ async def cb_llm_analyze(callback: CallbackQuery) -> None:
             text = await transcriber.transcribe(file_path)
             task_data["transcript"] = text
         except (ServiceDisabledError, TranscriptionError) as e:
-            await callback.message.edit_text(f"❌ {e.message}")
+            await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
             return
         except Exception as e:
             logger.error(f"Transcription for LLM error: {e}")
@@ -417,7 +417,7 @@ async def cb_llm_analyze(callback: CallbackQuery) -> None:
     try:
         result = await llm_router.analyze(text)
     except (ServiceDisabledError, LLMError) as e:
-        await callback.message.edit_text(f"❌ {e.message}")
+        await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
         return
     except Exception as e:
         logger.error(f"LLM analyze error: {e}")
