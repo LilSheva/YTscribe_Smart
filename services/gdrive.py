@@ -1,6 +1,10 @@
 """
 services/gdrive.py — Сервис загрузки файлов на Google Drive.
 
+Авторизация через OAuth 2.0 (Desktop App) — твой личный аккаунт.
+При первом запуске откроется браузер для авторизации,
+далее токен сохраняется в credentials/token.json.
+
 Обеспечивает:
   - Загрузку медиа-файлов в папку GDRIVE_MEDIA_FOLDER_ID.
   - Загрузку транскриптов (.md) в папку GDRIVE_TRANSCRIPTS_FOLDER_ID.
@@ -23,6 +27,12 @@ from core.config import (
 from core.exceptions import ServiceDisabledError, YTSBotError
 
 logger = logging.getLogger(__name__)
+
+# Путь к сохранённому токену (после первой авторизации)
+TOKEN_PATH: Path = BASE_DIR / "credentials" / "token.json"
+
+# Скоупы доступа
+SCOPES: list[str] = ["https://www.googleapis.com/auth/drive.file"]
 
 
 class GDriveError(YTSBotError):
@@ -49,24 +59,57 @@ def _check_enabled() -> None:
 
 
 def _get_service():
-    """Создаёт и возвращает Google Drive API service."""
+    """
+    Создаёт и возвращает Google Drive API service.
+
+    Использует OAuth 2.0 (Desktop App):
+    - Если token.json существует — использует его.
+    - Если токен истёк — автоматически обновляет.
+    - Если token.json нет — открывает браузер для авторизации.
+    """
     creds_path = BASE_DIR / GDRIVE_CREDENTIALS_PATH
     if not creds_path.exists():
-        raise GDriveError(f"Credentials не найдены: {creds_path}")
+        raise GDriveError(
+            f"OAuth credentials не найдены: {creds_path}\n"
+            "Скачайте OAuth Client ID (Desktop App) из Google Cloud Console "
+            "и сохраните как credentials/gdrive_service.json"
+        )
 
     try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
         from googleapiclient.discovery import build
-        from google.oauth2.service_account import Credentials
 
-        creds = Credentials.from_service_account_file(
-            str(creds_path),
-            scopes=["https://www.googleapis.com/auth/drive.file"],
-        )
+        creds = None
+
+        # Загружаем сохранённый токен
+        if TOKEN_PATH.exists():
+            creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+
+        # Если токен невалиден — обновляем или авторизуемся заново
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                logger.info("GDrive: обновление токена...")
+                creds.refresh(Request())
+            else:
+                logger.info("GDrive: первичная авторизация через браузер...")
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    str(creds_path), SCOPES
+                )
+                creds = flow.run_local_server(port=0)
+
+            # Сохраняем токен для будущих запусков
+            TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+            TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+            logger.info(f"GDrive: токен сохранён в {TOKEN_PATH}")
+
         return build("drive", "v3", credentials=creds)
+
     except ImportError:
         raise GDriveError(
             "google-api-python-client не установлен. "
-            "Выполните: pip install google-api-python-client google-auth"
+            "Выполните: pip install google-api-python-client google-auth google-auth-oauthlib"
         )
     except Exception as e:
         raise GDriveError(f"Ошибка авторизации GDrive: {e}") from e
@@ -109,7 +152,7 @@ def _upload_file_sync(file_path: Path, folder_id: str) -> GDriveResult:
 
         file_id = uploaded["id"]
 
-        # Сделать файл публичным (доступ по ссылке)
+        # Сделать файл доступным по ссылке
         service.permissions().create(
             fileId=file_id,
             body={"type": "anyone", "role": "reader"},
@@ -118,7 +161,7 @@ def _upload_file_sync(file_path: Path, folder_id: str) -> GDriveResult:
         public_url = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
         size_mb = file_path.stat().st_size / (1024 * 1024)
 
-        logger.info(f"Загружен на GDrive: {file_path.name} ({size_mb:.1f} MB) → folder={folder_id[:8]}...")
+        logger.info(f"Загружен на GDrive: {file_path.name} ({size_mb:.1f} MB)")
 
         return GDriveResult(
             file_name=file_path.name,
