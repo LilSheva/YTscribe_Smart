@@ -40,7 +40,7 @@ BOT_TOKEN: str = _get_env("BOT_TOKEN")
 # === API Keys ===
 GROQ_API_KEY: str = _get_env("GROQ_API_KEY")
 OMNIROUTE_API_KEY: str = _get_env("OMNIROUTE_API_KEY")
-OMNIROUTE_BASE_URL: str = _get_env("OMNIROUTE_BASE_URL", "https://omniroute.up.railway.app/v1")
+OMNIROUTE_BASE_URL: str = _get_env("OMNIROUTE_BASE_URL", "https://openrouter.ai/api/v1")
 
 # === Транскрибация ===
 TRANSCRIPTION_PROVIDER: str = _get_env("TRANSCRIPTION_PROVIDER", "groq")

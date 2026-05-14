@@ -323,20 +323,15 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
         except Exception as e:
             logger.warning(f"Автосохранение транскрипта на GDrive: {e}")
 
-    # --- Отправка результата ---
-    header = f"📝 **Транскрипт: {task.title}**\n\n"
-    parts = llm_router.split_for_telegram(header + text)
-
-    for part in parts:
-        await callback.message.answer(part, parse_mode="Markdown")
-
-    # Обновляем исходное сообщение
+    # --- Результат ---
     status_lines = [
         f"✅ Транскрибация завершена: **{task.title}**",
         f"📄 {len(text)} символов",
     ]
     if gdrive_md_url:
         status_lines.append(f"☁️ [Транскрипт на GDrive]({gdrive_md_url})")
+    else:
+        status_lines.append("⚠️ Не удалось загрузить на GDrive")
 
     await callback.message.edit_text(
         "\n".join(status_lines),
