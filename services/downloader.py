@@ -39,11 +39,18 @@ def _check_enabled() -> None:
 
 
 def _base_opts() -> dict:
-    """Базовые параметры yt-dlp (cookies, тишина)."""
+    """Базовые параметры yt-dlp (cookies, PO Token, тишина)."""
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
+        # Используем клиенты с PO Token (web + mweb) для обхода bot detection.
+        # Плагин bgutil-ytdlp-pot-provider автоматически получит токен с локального POT сервера.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "mweb"],
+            },
+        },
     }
     # Cookies: приоритет — файл cookies.txt, затем браузер
     cookies_file = BASE_DIR / "cookies.txt"
