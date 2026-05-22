@@ -17,10 +17,10 @@ import yt_dlp
 
 from core.config import (
     ENABLE_DOWNLOADER,
-    BROWSER_FOR_COOKIES,
     TEMP_DIR,
     BASE_DIR,
 )
+from services.cookie_manager import get_cookies_opts
 from core.exceptions import ServiceDisabledError, DownloadError
 from core.models import MediaTask
 
@@ -62,17 +62,7 @@ def _base_opts() -> dict:
             },
         },
     }
-    # Cookies: приоритет — браузер (свежие cookies), затем файл cookies.txt (fallback)
-    # Браузер ВСЕГДА в приоритете, даже если cookies.txt существует
-    cookies_file = BASE_DIR / "cookies.txt"
-    if BROWSER_FOR_COOKIES:
-        opts["cookiesfrombrowser"] = (BROWSER_FOR_COOKIES,)
-        logger.debug(f"Cookies: browser '{BROWSER_FOR_COOKIES}' (cookies.txt ignored)")
-    elif cookies_file.exists():
-        opts["cookiefile"] = str(cookies_file)
-        logger.debug("Cookies: file 'cookies.txt' (fallback)")
-    else:
-        logger.warning("Cookies: not configured (neither browser nor file)")
+    opts.update(get_cookies_opts())
     return opts
 
 

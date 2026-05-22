@@ -17,6 +17,7 @@ from aiogram.types import TelegramObject, Update
 
 from core.config import BOT_TOKEN, TEMP_DIR, LOG_LEVEL, ALLOWED_USER_IDS
 from services.history import init_db
+from services.cookie_manager import maybe_refresh_cookies
 from core.logger import setup_logging
 from bot.handlers.start import router as start_router
 from bot.handlers.url_handler import router as url_router
@@ -67,13 +68,16 @@ async def on_startup(bot: Bot) -> None:
     # Очистка temp/
     deleted = startup_cleanup(TEMP_DIR)
     if deleted:
-        logger.info(f"🧹 Startup cleanup: удалено {deleted} старых файлов из temp/")
+        logger.info(f"Startup cleanup: удалено {deleted} старых файлов из temp/")
     else:
-        logger.info("🧹 Startup cleanup: temp/ чист")
+        logger.info("Startup cleanup: temp/ чист")
+
+    # Фоновое обновление cookies.txt из браузера
+    asyncio.create_task(maybe_refresh_cookies())
 
     # Информация о боте
     bot_info = await bot.get_me()
-    logger.info(f"🤖 Бот запущен: @{bot_info.username} (id={bot_info.id})")
+    logger.info(f"Бот запущен: @{bot_info.username} (id={bot_info.id})")
 
 
 async def on_shutdown(bot: Bot) -> None:

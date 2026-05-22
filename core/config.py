@@ -57,9 +57,19 @@ GDRIVE_CREDENTIALS_PATH: str = _get_env("GDRIVE_CREDENTIALS_PATH", "credentials/
 GDRIVE_MEDIA_FOLDER_ID: str = _get_env("GDRIVE_MEDIA_FOLDER_ID")
 GDRIVE_TRANSCRIPTS_FOLDER_ID: str = _get_env("GDRIVE_TRANSCRIPTS_FOLDER_ID")
 
-# === Media ===
-BROWSER_FOR_COOKIES: str = _get_env("BROWSER_FOR_COOKIES", "chrome")
+# === Media / Cookies ===
 TEMP_DIR: Path = BASE_DIR / _get_env("TEMP_DIR", "temp")
+
+# Порядок браузеров для fallback-цепочки (Firefox первым — нет DPAPI)
+COOKIE_BROWSERS: list[str] = [
+    b.strip()
+    for b in _get_env("COOKIE_BROWSERS", "firefox,chrome,zen").split(",")
+    if b.strip()
+]
+# Максимальный возраст cookies.txt при котором он считается свежим
+COOKIE_MAX_AGE_HOURS: float = float(_get_env("COOKIE_MAX_AGE_HOURS", "6"))
+# Интервал фонового обновления cookies.txt
+COOKIE_REFRESH_INTERVAL_HOURS: float = float(_get_env("COOKIE_REFRESH_INTERVAL_HOURS", "4"))
 
 # === Feature Toggles ===
 ENABLE_DOWNLOADER: bool = _get_bool("ENABLE_DOWNLOADER", default=True)
