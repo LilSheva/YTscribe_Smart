@@ -151,7 +151,7 @@ async def handle_youtube_url(message: Message) -> None:
         f"Выберите действие:"
     )
 
-    keyboard = get_media_keyboard(task_id)
+    keyboard = get_media_keyboard(task_id, has_transcript=bool(cached_text))
     await status_msg.edit_text(card_text, reply_markup=keyboard, parse_mode="Markdown")
 
 

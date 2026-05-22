@@ -10,12 +10,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from core.config import features
 
 
-def get_media_keyboard(task_id: str) -> InlineKeyboardMarkup:
+def get_media_keyboard(task_id: str, has_transcript: bool = False) -> InlineKeyboardMarkup:
     """
     Клавиатура действий после получения метаданных видео.
 
     Args:
         task_id: Короткий идентификатор задачи (для callback_data).
+        has_transcript: True если транскрипт уже есть в БД.
 
     Returns:
         InlineKeyboardMarkup с кнопками доступных действий.
@@ -26,10 +27,10 @@ def get_media_keyboard(task_id: str) -> InlineKeyboardMarkup:
         builder.button(text="🎵 Скачать M4A", callback_data=f"dl_m4a:{task_id}")
         builder.button(text="🎬 Скачать MP4", callback_data=f"dl_mp4:{task_id}")
 
-    if features.transcript:
+    if features.transcript and not has_transcript:
         builder.button(text="📝 Транскрибировать", callback_data=f"transcript:{task_id}")
 
-    if features.llm:
+    if features.llm and has_transcript:
         builder.button(text="🧠 AI Анализ", callback_data=f"llm_variants:{task_id}")
 
     # Раскладка: 2 кнопки в ряд

@@ -133,8 +133,40 @@ def init_db() -> None:
 
 
 def _migrate(c: sqlite3.Connection) -> None:
-    """Переносит данные из старой таблицы transcripts если она существует."""
+    """Переносит данные из старых таблиц в новую схему."""
     tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+    # Пересоздаём analysis_results если в ней старая колонка transcript_id
+    if "analysis_results" in tables:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(analysis_results)").fetchall()}
+        if "transcript_id" in cols:
+            logger.info("DB migrate: пересоздаём analysis_results (transcript_id -> video_id)...")
+            c.executescript("""
+                ALTER TABLE analysis_results RENAME TO analysis_results_old;
+                CREATE TABLE analysis_results (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id    TEXT    NOT NULL,
+                    label       TEXT    NOT NULL,
+                    prompt      TEXT    NOT NULL,
+                    result      TEXT    NOT NULL,
+                    created_at  TEXT    NOT NULL
+                );
+            """)
+
+    # Пересоздаём analysis_variants если в ней старая колонка transcript_id
+    if "analysis_variants" in tables:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(analysis_variants)").fetchall()}
+        if "transcript_id" in cols:
+            logger.info("DB migrate: пересоздаём analysis_variants (transcript_id -> video_id)...")
+            c.executescript("""
+                DROP TABLE analysis_variants;
+                CREATE TABLE analysis_variants (
+                    video_id        TEXT PRIMARY KEY,
+                    variants_json   TEXT NOT NULL,
+                    created_at      TEXT NOT NULL
+                );
+            """)
+
     if "transcripts" not in tables:
         return
 
