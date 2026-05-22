@@ -16,7 +16,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.types import TelegramObject, Update
 
 from core.config import BOT_TOKEN, TEMP_DIR, LOG_LEVEL, ALLOWED_USER_IDS
-from services.history import init_db
+from services.db import init_db
 from services.cookie_manager import maybe_refresh_cookies
 from core.logger import setup_logging
 from bot.handlers.start import router as start_router

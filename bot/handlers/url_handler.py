@@ -22,9 +22,9 @@ from aiogram.fsm.state import State, StatesGroup
 from core.config import features, ENABLE_GDRIVE
 from core.models import MediaTask
 from core.exceptions import ServiceDisabledError, DownloadError, TranscriptionError, LLMError, YTSBotError
+from services import db
 from services import downloader
 from services import gdrive
-from services import history
 from services import transcriber
 from services import llm_router
 from bot.keyboards.main_menu import get_media_keyboard, get_post_download_keyboard, get_analysis_variants_keyboard, get_analysis_menu_keyboard
@@ -126,8 +126,10 @@ async def handle_youtube_url(message: Message) -> None:
         await status_msg.edit_text("❌ Не удалось получить информацию о видео.")
         return
 
-    # Проверяем дубликат в истории
-    existing = history.get_by_video_id(message.from_user.id, task.video_id)
+    # Проверяем дубликат в БД
+    db.upsert_video(task, message.from_user.id)
+    state = db.get_state(task.video_id)
+    cached_text = db.get_transcript_text(task.video_id) if state and state.has_transcript else None
 
     # Сохраняем задачу
     task_id = _generate_task_id()
@@ -136,14 +138,11 @@ async def handle_youtube_url(message: Message) -> None:
         "task": task,
         "user_id": message.from_user.id,
     }
-    if existing:
-        cached_text = history.get_transcript_text(existing)
-        if cached_text:
-            _tasks[task_id]["transcript"] = cached_text
-            _tasks[task_id]["history_entry"] = existing
+    if cached_text:
+        _tasks[task_id]["transcript"] = cached_text
 
     # Карточка с метаданными
-    cached_note = "\n♻️ _Транскрипт уже есть в истории_" if existing and _tasks[task_id].get("transcript") else ""
+    cached_note = "\n♻️ _Транскрипт уже есть в истории_" if cached_text else ""
     card_text = (
         f"🎬 **{task.title}**\n"
         f"📺 {task.channel}\n"
@@ -420,23 +419,18 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
 
     task_data["transcript"] = text
 
+    # --- Сохраняем транскрипт в БД и на диск ---
+    md_path = db.save_transcript_file(task, text)
+
     # --- GDrive ---
     gdrive_md_url: str | None = None
     if ENABLE_GDRIVE:
         try:
-            from utils.md_generator import generate_transcript_md
-            md_path = generate_transcript_md(task, text)
             gdrive_result = await gdrive.upload_transcript(md_path)
             gdrive_md_url = gdrive_result.public_url
-            md_path.unlink(missing_ok=True)
+            db.set_gdrive_transcript(task.video_id, gdrive_md_url)
         except Exception as e:
             logger.warning(f"Автосохранение транскрипта на GDrive: {e}")
-
-    if gdrive_md_url:
-        try:
-            history.add(callback.from_user.id, task, gdrive_md_url, text)
-        except Exception as e:
-            logger.warning(f"History add error: {e}")
 
     status_lines = [
         f"✅ Транскрибация завершена: **{task.title}**",
@@ -537,22 +531,17 @@ async def cb_llm_variants(callback: CallbackQuery) -> None:
             done_tr.set()
             ticker_tr.cancel()
 
-    # Получаем entry из истории
-    entry = task_data.get("history_entry") or history.get_by_video_id(callback.from_user.id, task.video_id)
-    task_data["history_entry"] = entry
-
     # Проверяем сохранённые варианты
-    cached_variants = history.get_variants(entry.id) if entry else None
+    cached_variants = db.get_variants(task.video_id)
     if cached_variants:
         variants = cached_variants
     else:
         await callback.message.edit_text("🤔 Анализирую содержание...", parse_mode=None)
         variants = await llm_router.get_analysis_variants(text)
-        if entry:
-            history.save_variants(entry.id, variants)
+        db.save_variants(task.video_id, variants)
     task_data["variants"] = variants
 
-    past_results = history.get_analysis_results(entry.id) if entry else []
+    past_results = [vars(r) for r in db.get_analysis_results(task.video_id)]
     keyboard = get_analysis_menu_keyboard(task_id, variants, past_results)
     await callback.message.edit_text(
         f"🎯 **{task.title}**\n\nВыберите тип анализа:",
@@ -564,13 +553,13 @@ async def cb_llm_variants(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("view_result:"))
 async def cb_view_result(callback: CallbackQuery) -> None:
     result_id = int(callback.data.split(":")[1])
-    r = history.get_analysis_result(result_id)
+    r = db.get_analysis_result(result_id)
     if not r:
         await callback.answer("Ответ не найден.", show_alert=True)
         return
     await callback.answer()
-    header = f"📄 **{r['label']}**\n\n"
-    for part in llm_router.split_for_telegram(header + r["result"]):
+    header = f"📄 **{r.label}**\n\n"
+    for part in llm_router.split_for_telegram(header + r.result):
         await callback.message.answer(part, parse_mode="Markdown")
 
 
@@ -609,11 +598,8 @@ async def cb_variants_refresh_comment(message: Message, state: FSMContext) -> No
     all_variants = existing + new_variants
     task_data["variants"] = all_variants
 
-    entry = task_data.get("history_entry")
-    if entry:
-        history.save_variants(entry.id, all_variants)
-
-    past_results = history.get_analysis_results(entry.id) if entry else []
+    db.save_variants(task.video_id, all_variants)
+    past_results = [vars(r) for r in db.get_analysis_results(task.video_id)]
     keyboard = get_analysis_menu_keyboard(task_id, all_variants, past_results)
     await status.edit_text(
         f"🎯 **{task.title}**\n\nВыберите тип анализа:",
@@ -663,38 +649,26 @@ async def cb_llm_analyze(callback: CallbackQuery) -> None:
         await callback.message.answer(part, parse_mode="Markdown")
 
     gdrive_md_url: str | None = None
-    if ENABLE_GDRIVE:
-        try:
-            from utils.md_generator import generate_transcript_md
-            combined = f"{text}\n\n---\n\n## {chosen['label']}\n\n{result}"
-            md_path = generate_transcript_md(task, combined)
-            gdrive_result = await gdrive.upload_transcript(md_path)
-            gdrive_md_url = gdrive_result.public_url
-            md_path.unlink(missing_ok=True)
-        except Exception as e:
-            logger.warning(f"Автосохранение анализа на GDrive: {e}")
 
-    if task_data.get("transcript"):
-        try:
-            entry = task_data.get("history_entry") or history.get_by_video_id(callback.from_user.id, task.video_id)
-            if not entry and gdrive_md_url:
-                entry = history.get(history.add(callback.from_user.id, task, gdrive_md_url, task_data["transcript"]))
-                task_data["history_entry"] = entry
-            if entry:
-                result_id = history.save_analysis_result(entry.id, chosen["label"], chosen["prompt"], result)
-                history.append_llm_result(entry, chosen["label"], chosen["prompt"], result)
-                # Синхронизируем обновлённый .md на GDrive
-                if ENABLE_GDRIVE:
+    # Сохраняем результат в БД и дописываем в .md
+    try:
+        db.add_analysis_result(task.video_id, chosen["label"], chosen["prompt"], result)
+        db.append_llm_to_file(task.video_id, chosen["label"], chosen["prompt"], result)
+        db.record_llm_call(task.video_id, chosen["prompt"])
+        # Синхронизируем обновлённый .md на GDrive
+        if ENABLE_GDRIVE:
+            state = db.get_state(task.video_id)
+            if state and state.transcript_path:
+                updated_md = Path(state.transcript_path)
+                if updated_md.exists():
                     try:
-                        updated_md = Path(entry.md_path)
-                        if updated_md.exists():
-                            gdrive_sync = await gdrive.upload_transcript(updated_md)
-                            history.update_gdrive_url(entry.id, gdrive_sync.public_url)
-                            gdrive_md_url = gdrive_sync.public_url
+                        gdrive_sync = await gdrive.upload_transcript(updated_md)
+                        db.set_gdrive_synced_after_llm(task.video_id)
+                        gdrive_md_url = gdrive_sync.public_url
                     except Exception as e:
                         logger.warning(f"GDrive sync error: {e}")
-        except Exception as e:
-            logger.warning(f"History update error: {e}")
+    except Exception as e:
+        logger.warning(f"DB update error after LLM: {e}")
 
     status_lines = [
         f"✅ **{chosen['label']}** завершён: **{task.title}**",

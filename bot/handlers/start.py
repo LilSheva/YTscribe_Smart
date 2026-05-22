@@ -10,7 +10,7 @@ from aiogram.types import Message, CallbackQuery
 
 from core.config import features
 from bot.keyboards.main_menu import get_main_reply_keyboard, get_history_list_keyboard, get_history_item_keyboard
-from services import history
+from services import db
 
 router = Router(name="start")
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ async def btn_new_link(message: Message) -> None:
 
 @router.message(F.text == "📜 История")
 async def btn_history(message: Message) -> None:
-    entries = history.list_by_user(message.from_user.id)
+    entries = db.list_videos(message.from_user.id)
     if not entries:
         await message.answer("История пуста. Транскрибируй видео — оно появится здесь.")
         return
@@ -57,7 +57,7 @@ async def btn_history(message: Message) -> None:
 @router.callback_query(F.data.startswith("hist_list:"))
 async def cb_hist_list(callback: CallbackQuery) -> None:
     page = int(callback.data.split(":")[1])
-    entries = history.list_by_user(callback.from_user.id)
+    entries = db.list_videos(callback.from_user.id)
     if not entries:
         await callback.message.edit_text("История пуста.")
         return
@@ -68,32 +68,42 @@ async def cb_hist_list(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("hist_item:"))
 async def cb_hist_item(callback: CallbackQuery) -> None:
-    entry_id = int(callback.data.split(":")[1])
-    entry = history.get(entry_id)
+    video_id = callback.data.split(":")[1]
+    entry = db.get_video(video_id)
     if not entry:
         await callback.answer("Запись не найдена.", show_alert=True)
         return
+    state = db.get_state(video_id)
     mins = entry.duration_sec // 60
-    text = f"🎬 <b>{entry.title}</b>\n📺 {entry.channel} • {mins} мин\n🕐 {entry.created_at[:16]}"
-    await callback.message.edit_text(text, reply_markup=get_history_item_keyboard(entry_id), parse_mode="HTML")
+    gdrive_url = state.gdrive_transcript_url if state else ""
+    has_summary = state.has_summary if state else False
+    llm_count = state.llm_call_count if state else 0
+    status_line = "✅ транскрипт" + (f" • 🧠 {llm_count} LLM" if has_summary else "")
+    text = (
+        f"🎬 <b>{entry.title}</b>\n"
+        f"📺 {entry.channel} • {mins} мин\n"
+        f"🕐 {entry.added_at[:16]}\n"
+        f"{status_line}"
+    )
+    await callback.message.edit_text(text, reply_markup=get_history_item_keyboard(video_id), parse_mode="HTML")
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("hist_gdrive:"))
 async def cb_hist_gdrive(callback: CallbackQuery) -> None:
-    entry_id = int(callback.data.split(":")[1])
-    entry = history.get(entry_id)
-    if not entry:
-        await callback.answer("Запись не найдена.", show_alert=True)
+    video_id = callback.data.split(":")[1]
+    state = db.get_state(video_id)
+    if not state or not state.gdrive_transcript_url:
+        await callback.answer("GDrive ссылка недоступна.", show_alert=True)
         return
-    await callback.answer(f"☁️ {entry.gdrive_url}", show_alert=True)
+    await callback.answer(f"☁️ {state.gdrive_transcript_url}", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("hist_delete:"))
 async def cb_hist_delete(callback: CallbackQuery) -> None:
-    entry_id = int(callback.data.split(":")[1])
-    history.delete(entry_id)
-    entries = history.list_by_user(callback.from_user.id)
+    video_id = callback.data.split(":")[1]
+    db.delete_video(video_id)
+    entries = db.list_videos(callback.from_user.id)
     if not entries:
         await callback.message.edit_text("История пуста.")
     else:
@@ -105,13 +115,13 @@ async def cb_hist_delete(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("hist_analyze:"))
 async def cb_hist_analyze(callback: CallbackQuery) -> None:
     from bot.handlers.url_handler import _tasks
-    entry_id = int(callback.data.split(":")[1])
-    entry = history.get(entry_id)
+    video_id = callback.data.split(":")[1]
+    entry = db.get_video(video_id)
     if not entry:
         await callback.answer("Запись не найдена.", show_alert=True)
         return
 
-    transcript_text = history.get_transcript_text(entry)
+    transcript_text = db.get_transcript_text(video_id)
     if not transcript_text:
         await callback.answer("Текст транскрипта недоступен.", show_alert=True)
         return

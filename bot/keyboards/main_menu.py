@@ -94,11 +94,11 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def get_history_item_keyboard(entry_id: int) -> InlineKeyboardMarkup:
+def get_history_item_keyboard(video_id: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="🧠 Анализ", callback_data=f"hist_analyze:{entry_id}")
-    builder.button(text="☁️ GDrive", callback_data=f"hist_gdrive:{entry_id}")
-    builder.button(text="🗑 Удалить", callback_data=f"hist_delete:{entry_id}")
+    builder.button(text="🧠 Анализ", callback_data=f"hist_analyze:{video_id}")
+    builder.button(text="☁️ GDrive", callback_data=f"hist_gdrive:{video_id}")
+    builder.button(text="🗑 Удалить", callback_data=f"hist_delete:{video_id}")
     builder.button(text="◀️ Назад", callback_data="hist_list:0")
     builder.adjust(3, 1)
     return builder.as_markup()
@@ -109,7 +109,7 @@ def get_history_list_keyboard(entries: list, page: int = 0, page_size: int = 5) 
     start = page * page_size
     for e in entries[start:start + page_size]:
         mins = e.duration_sec // 60
-        builder.button(text=f"{e.title[:35]} ({mins}м)", callback_data=f"hist_item:{e.id}")
+        builder.button(text=f"{e.title[:35]} ({mins}м)", callback_data=f"hist_item:{e.video_id}")
     builder.adjust(1)
     if page > 0:
         builder.button(text="◀️", callback_data=f"hist_list:{page-1}")
