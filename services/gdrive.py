@@ -80,6 +80,7 @@ def _get_service():
         from google.oauth2.credentials import Credentials
         from google_auth_oauthlib.flow import InstalledAppFlow
         from googleapiclient.discovery import build
+        import httplib2
 
         creds = None
 
@@ -104,7 +105,8 @@ def _get_service():
             TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
             logger.info(f"GDrive: токен сохранён в {TOKEN_PATH}")
 
-        return build("drive", "v3", credentials=creds)
+        http = httplib2.Http(timeout=30)
+        return build("drive", "v3", credentials=creds, http=http, num_retries=2)
 
     except ImportError:
         raise GDriveError(

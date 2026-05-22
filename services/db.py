@@ -278,10 +278,13 @@ def get_state(video_id: str) -> ProcessingState | None:
 def set_transcript(video_id: str, transcript_path: str) -> None:
     with _conn() as c:
         c.execute("""
-            UPDATE processing_state
-            SET has_transcript=1, transcript_path=?, gdrive_updated_after_llm=0
-            WHERE video_id=?
-        """, (transcript_path, video_id))
+            INSERT INTO processing_state (video_id, has_transcript, transcript_path)
+            VALUES (?, 1, ?)
+            ON CONFLICT(video_id) DO UPDATE SET
+                has_transcript=1,
+                transcript_path=excluded.transcript_path,
+                gdrive_updated_after_llm=0
+        """, (video_id, transcript_path))
 
 
 def set_gdrive_transcript(video_id: str, url: str) -> None:
