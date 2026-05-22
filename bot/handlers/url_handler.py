@@ -9,37 +9,79 @@ bot/handlers/url_handler.py — Обработка YouTube-ссылок и callb
 
 import re
 import uuid
+import asyncio
+import time
 import logging
 from pathlib import Path
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from core.config import features, ENABLE_GDRIVE
 from core.models import MediaTask
 from core.exceptions import ServiceDisabledError, DownloadError, TranscriptionError, LLMError, YTSBotError
 from services import downloader
 from services import gdrive
+from services import history
 from services import transcriber
 from services import llm_router
-from bot.keyboards.main_menu import get_media_keyboard, get_post_download_keyboard
+from bot.keyboards.main_menu import get_media_keyboard, get_post_download_keyboard, get_analysis_variants_keyboard, get_analysis_menu_keyboard
+
+class VariantRefreshState(StatesGroup):
+    waiting_comment = State()
+
 
 router = Router(name="url_handler")
 logger = logging.getLogger(__name__)
 
-# Хранилище задач в памяти (task_id -> данные)
-# В продакшене можно заменить на Redis/FSM Storage
 _tasks: dict[str, dict] = {}
 
-# Лимит Telegram Bot API для отправки файлов (50 MB)
 TELEGRAM_FILE_LIMIT_MB: float = 50.0
 
-# Regex для YouTube-ссылок
 YOUTUBE_URL_PATTERN = re.compile(
     r"(https?://)?(www\.)?"
     r"(youtube\.com/(watch\?v=|shorts/|live/)|youtu\.be/)"
     r"[\w\-]{11}"
 )
+
+# Groq обрабатывает ~216x realtime
+_GROQ_REALTIME_FACTOR = 216
+
+
+def _progress_bar(pct: float, width: int = 10) -> str:
+    filled = round(pct * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+async def _ticker(
+    msg: CallbackQuery | Message,
+    prefix: str,
+    *,
+    total_sec: float | None = None,
+    done_event: asyncio.Event,
+    interval: float = 3.0,
+) -> None:
+    """Обновляет сообщение каждые interval секунд пока не установлен done_event."""
+    start = time.monotonic()
+    message = msg.message if isinstance(msg, CallbackQuery) else msg
+    while not done_event.is_set():
+        await asyncio.sleep(interval)
+        if done_event.is_set():
+            break
+        elapsed = time.monotonic() - start
+        if total_sec:
+            pct = min(elapsed / total_sec, 0.95)
+            remaining = max(total_sec - elapsed, 1)
+            bar = _progress_bar(pct)
+            text = f"{prefix}\n[{bar}] {pct*100:.0f}% • ~{remaining:.0f}с осталось"
+        else:
+            text = f"{prefix}\n⏱ {elapsed:.0f}с..."
+        try:
+            await message.edit_text(text)
+        except Exception:
+            break
 
 
 def _extract_url(text: str) -> str | None:
@@ -84,6 +126,9 @@ async def handle_youtube_url(message: Message) -> None:
         await status_msg.edit_text("❌ Не удалось получить информацию о видео.")
         return
 
+    # Проверяем дубликат в истории
+    existing = history.get_by_video_id(message.from_user.id, task.video_id)
+
     # Сохраняем задачу
     task_id = _generate_task_id()
     _tasks[task_id] = {
@@ -91,12 +136,19 @@ async def handle_youtube_url(message: Message) -> None:
         "task": task,
         "user_id": message.from_user.id,
     }
+    if existing:
+        cached_text = history.get_transcript_text(existing)
+        if cached_text:
+            _tasks[task_id]["transcript"] = cached_text
+            _tasks[task_id]["history_entry"] = existing
 
     # Карточка с метаданными
+    cached_note = "\n♻️ _Транскрипт уже есть в истории_" if existing and _tasks[task_id].get("transcript") else ""
     card_text = (
         f"🎬 **{task.title}**\n"
         f"📺 {task.channel}\n"
-        f"⏱ {task.duration_formatted}\n\n"
+        f"⏱ {task.duration_formatted}"
+        f"{cached_note}\n\n"
         f"Выберите действие:"
     )
 
@@ -154,13 +206,6 @@ async def cb_send_to_chat(callback: CallbackQuery) -> None:
 
 
 async def _handle_download(callback: CallbackQuery, format_type: str) -> None:
-    """
-    Общая логика скачивания: download → GDrive upload → ответ юзеру.
-
-    Args:
-        callback: Callback query от кнопки.
-        format_type: Формат файла ("m4a" или "mp4").
-    """
     task_id = callback.data.split(":")[1]
     task_data = _tasks.get(task_id)
 
@@ -173,22 +218,48 @@ async def _handle_download(callback: CallbackQuery, format_type: str) -> None:
 
     await callback.answer()
 
-    # Обновляем сообщение — статус загрузки
-    await callback.message.edit_text(
-        f"⬇️ Скачиваю **{task.title}** ({format_type.upper()})...",
-        parse_mode="Markdown",
-    )
+    prefix = f"⬇️ Скачиваю **{task.title}** ({format_type.upper()})"
+    await callback.message.edit_text(prefix + "...", parse_mode="Markdown")
 
-    # --- Скачивание ---
+    # Прогресс скачивания — реальный % из yt-dlp progress_hooks
+    done_event = asyncio.Event()
+    last_pct: list[float] = [0.0]
+
+    def on_progress(pct: float) -> None:
+        last_pct[0] = pct
+
+    async def _dl_ticker() -> None:
+        while not done_event.is_set():
+            await asyncio.sleep(2)
+            if done_event.is_set():
+                break
+            pct = last_pct[0]
+            bar = _progress_bar(pct)
+            try:
+                await callback.message.edit_text(
+                    f"{prefix}\n[{bar}] {pct*100:.0f}%",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                break
+
+    ticker_task = asyncio.create_task(_dl_ticker())
     try:
-        result_task = await downloader.download_media(url, format_type)
+        result_task = await downloader.download_media(url, format_type, on_progress=on_progress)
     except (ServiceDisabledError, DownloadError) as e:
+        done_event.set()
+        ticker_task.cancel()
         await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
         return
     except Exception as e:
+        done_event.set()
+        ticker_task.cancel()
         logger.error(f"Download error: {e}")
         await callback.message.edit_text("❌ Ошибка при скачивании.")
         return
+    finally:
+        done_event.set()
+        ticker_task.cancel()
 
     file_path = result_task.temp_file_path
     if not file_path or not file_path.exists():
@@ -251,7 +322,6 @@ async def _handle_download(callback: CallbackQuery, format_type: str) -> None:
 
 @router.callback_query(F.data.startswith("transcript:"))
 async def cb_transcribe(callback: CallbackQuery) -> None:
-    """Callback: скачивание аудио → транскрибация → текст в чат."""
     task_id = callback.data.split(":")[1]
     task_data = _tasks.get(task_id)
 
@@ -261,18 +331,51 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
 
     url = task_data["url"]
     task: MediaTask = task_data["task"]
-
     await callback.answer()
 
-    # Статус: скачиваю аудио
-    await callback.message.edit_text(
-        f"⬇️ Скачиваю аудио **{task.title}**...",
-        parse_mode="Markdown",
-    )
+    # Если транскрипт уже есть в кэше — пропускаем скачивание
+    if task_data.get("transcript"):
+        text = task_data["transcript"]
+        entry = task_data.get("history_entry")
+        gdrive_md_url = entry.gdrive_url if entry else None
+        status_lines = [
+            f"✅ Транскрибация завершена: **{task.title}**",
+            f"📄 {len(text)} символов _(из кэша)_",
+        ]
+        if gdrive_md_url:
+            status_lines.append(f"☁️ [Транскрипт на GDrive]({gdrive_md_url})")
+        await callback.message.edit_text(
+            "\n".join(status_lines), parse_mode="Markdown", disable_web_page_preview=True,
+        )
+        return
 
-    # --- Скачивание M4A ---
+    # --- Скачивание с прогрессом ---
+    prefix_dl = f"⬇️ Скачиваю аудио **{task.title}**"
+    await callback.message.edit_text(prefix_dl + "...", parse_mode="Markdown")
+
+    done_dl = asyncio.Event()
+    last_pct: list[float] = [0.0]
+
+    def on_progress(pct: float) -> None:
+        last_pct[0] = pct
+
+    async def _dl_ticker() -> None:
+        while not done_dl.is_set():
+            await asyncio.sleep(2)
+            if done_dl.is_set():
+                break
+            bar = _progress_bar(last_pct[0])
+            try:
+                await callback.message.edit_text(
+                    f"{prefix_dl}\n[{bar}] {last_pct[0]*100:.0f}%",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                break
+
+    ticker = asyncio.create_task(_dl_ticker())
     try:
-        result_task = await downloader.download_media(url, "m4a")
+        result_task = await downloader.download_media(url, "m4a", on_progress=on_progress)
     except (ServiceDisabledError, DownloadError) as e:
         await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
         return
@@ -280,23 +383,28 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
         logger.error(f"Download for transcript error: {e}")
         await callback.message.edit_text("❌ Ошибка при скачивании аудио.")
         return
+    finally:
+        done_dl.set()
+        ticker.cancel()
 
     file_path = result_task.temp_file_path
     if not file_path or not file_path.exists():
         await callback.message.edit_text("❌ Аудиофайл не найден после загрузки.")
         return
-
     task_data["file_path"] = file_path
 
-    # Статус: транскрибирую
+    # --- Транскрибация с предиктивным прогрессом ---
+    # Groq ~216x realtime: 20 мин аудио ≈ 5-6 сек
+    transcribe_sec = max(task.duration_sec / _GROQ_REALTIME_FACTOR, 3.0)
     size_mb = file_path.stat().st_size / (1024 * 1024)
-    await callback.message.edit_text(
-        f"📝 Транскрибирую **{task.title}** ({size_mb:.1f} MB)...\n"
-        f"Это может занять 30–120 секунд.",
-        parse_mode="Markdown",
-    )
+    prefix_tr = f"📝 Транскрибирую **{task.title}** ({size_mb:.1f} MB)"
 
-    # --- Транскрибация ---
+    done_tr = asyncio.Event()
+    ticker_tr = asyncio.create_task(
+        _ticker(callback, prefix_tr, total_sec=transcribe_sec, done_event=done_tr)
+    )
+    await callback.message.edit_text(prefix_tr + "...", parse_mode="Markdown")
+
     try:
         text = await transcriber.transcribe(file_path)
     except (ServiceDisabledError, TranscriptionError) as e:
@@ -306,11 +414,13 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
         logger.error(f"Transcription error: {e}")
         await callback.message.edit_text("❌ Ошибка транскрибации.")
         return
+    finally:
+        done_tr.set()
+        ticker_tr.cancel()
 
-    # Сохраняем транскрипт в задачу
     task_data["transcript"] = text
 
-    # --- Автосохранение .md на GDrive ---
+    # --- GDrive ---
     gdrive_md_url: str | None = None
     if ENABLE_GDRIVE:
         try:
@@ -318,12 +428,16 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
             md_path = generate_transcript_md(task, text)
             gdrive_result = await gdrive.upload_transcript(md_path)
             gdrive_md_url = gdrive_result.public_url
-            # Удаляем временный .md
             md_path.unlink(missing_ok=True)
         except Exception as e:
             logger.warning(f"Автосохранение транскрипта на GDrive: {e}")
 
-    # --- Результат ---
+    if gdrive_md_url:
+        try:
+            history.add(callback.from_user.id, task, gdrive_md_url, text)
+        except Exception as e:
+            logger.warning(f"History add error: {e}")
+
     status_lines = [
         f"✅ Транскрибация завершена: **{task.title}**",
         f"📄 {len(text)} символов",
@@ -334,63 +448,81 @@ async def cb_transcribe(callback: CallbackQuery) -> None:
         status_lines.append("⚠️ Не удалось загрузить на GDrive")
 
     await callback.message.edit_text(
-        "\n".join(status_lines),
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
+        "\n".join(status_lines), parse_mode="Markdown", disable_web_page_preview=True,
     )
-
     logger.info(f"Transcript complete: {task.title} ({len(text)} chars), GDrive: {'OK' if gdrive_md_url else 'SKIP'}")
 
 
-@router.callback_query(F.data.startswith("llm_analyze:"))
-async def cb_llm_analyze(callback: CallbackQuery) -> None:
-    """Callback: скачивание → транскрибация → LLM анализ → результат в чат."""
+@router.callback_query(F.data.startswith("llm_variants:"))
+async def cb_llm_variants(callback: CallbackQuery) -> None:
+    """Показывает варианты анализа после транскрипции."""
     task_id = callback.data.split(":")[1]
     task_data = _tasks.get(task_id)
-
     if not task_data:
         await callback.answer("❌ Задача не найдена. Отправьте ссылку заново.", show_alert=True)
         return
 
     url = task_data["url"]
     task: MediaTask = task_data["task"]
-
     await callback.answer()
 
-    # Если транскрипт уже есть — используем его
     text = task_data.get("transcript")
 
     if not text:
-        # Скачиваем аудио
-        await callback.message.edit_text(
-            f"⬇️ Скачиваю аудио **{task.title}**...",
-            parse_mode="Markdown",
-        )
+        # Скачивание с прогрессом
+        prefix_dl = f"⬇️ Скачиваю аудио **{task.title}**"
+        await callback.message.edit_text(prefix_dl + "...", parse_mode="Markdown")
 
+        done_dl = asyncio.Event()
+        last_pct: list[float] = [0.0]
+
+        def on_progress(pct: float) -> None:
+            last_pct[0] = pct
+
+        async def _dl_ticker() -> None:
+            while not done_dl.is_set():
+                await asyncio.sleep(2)
+                if done_dl.is_set():
+                    break
+                bar = _progress_bar(last_pct[0])
+                try:
+                    await callback.message.edit_text(
+                        f"{prefix_dl}\n[{bar}] {last_pct[0]*100:.0f}%",
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    break
+
+        ticker = asyncio.create_task(_dl_ticker())
         try:
-            result_task = await downloader.download_media(url, "m4a")
+            result_task = await downloader.download_media(url, "m4a", on_progress=on_progress)
         except (ServiceDisabledError, DownloadError) as e:
             await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
             return
         except Exception as e:
-            logger.error(f"Download for LLM error: {e}")
+            logger.error(f"Download for variants error: {e}")
             await callback.message.edit_text("❌ Ошибка при скачивании аудио.")
             return
+        finally:
+            done_dl.set()
+            ticker.cancel()
 
         file_path = result_task.temp_file_path
         if not file_path or not file_path.exists():
             await callback.message.edit_text("❌ Аудиофайл не найден после загрузки.")
             return
-
         task_data["file_path"] = file_path
 
-        # Транскрибируем
+        # Транскрибация с предиктивным прогрессом
+        transcribe_sec = max(task.duration_sec / _GROQ_REALTIME_FACTOR, 3.0)
         size_mb = file_path.stat().st_size / (1024 * 1024)
-        await callback.message.edit_text(
-            f"📝 Транскрибирую **{task.title}** ({size_mb:.1f} MB)...",
-            parse_mode="Markdown",
-        )
+        prefix_tr = f"📝 Транскрибирую **{task.title}** ({size_mb:.1f} MB)"
+        await callback.message.edit_text(prefix_tr + "...", parse_mode="Markdown")
 
+        done_tr = asyncio.Event()
+        ticker_tr = asyncio.create_task(
+            _ticker(callback, prefix_tr, total_sec=transcribe_sec, done_event=done_tr)
+        )
         try:
             text = await transcriber.transcribe(file_path)
             task_data["transcript"] = text
@@ -398,19 +530,123 @@ async def cb_llm_analyze(callback: CallbackQuery) -> None:
             await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
             return
         except Exception as e:
-            logger.error(f"Transcription for LLM error: {e}")
+            logger.error(f"Transcription for variants error: {e}")
             await callback.message.edit_text("❌ Ошибка транскрибации.")
             return
+        finally:
+            done_tr.set()
+            ticker_tr.cancel()
 
-    # --- LLM анализ ---
+    # Получаем entry из истории
+    entry = task_data.get("history_entry") or history.get_by_video_id(callback.from_user.id, task.video_id)
+    task_data["history_entry"] = entry
+
+    # Проверяем сохранённые варианты
+    cached_variants = history.get_variants(entry.id) if entry else None
+    if cached_variants:
+        variants = cached_variants
+    else:
+        await callback.message.edit_text("🤔 Анализирую содержание...", parse_mode=None)
+        variants = await llm_router.get_analysis_variants(text)
+        if entry:
+            history.save_variants(entry.id, variants)
+    task_data["variants"] = variants
+
+    past_results = history.get_analysis_results(entry.id) if entry else []
+    keyboard = get_analysis_menu_keyboard(task_id, variants, past_results)
     await callback.message.edit_text(
-        f"🧠 AI анализирует **{task.title}**...\n"
-        f"Модель обрабатывает {len(text)} символов.",
+        f"🎯 **{task.title}**\n\nВыберите тип анализа:",
+        reply_markup=keyboard,
         parse_mode="Markdown",
     )
 
+
+@router.callback_query(F.data.startswith("view_result:"))
+async def cb_view_result(callback: CallbackQuery) -> None:
+    result_id = int(callback.data.split(":")[1])
+    r = history.get_analysis_result(result_id)
+    if not r:
+        await callback.answer("Ответ не найден.", show_alert=True)
+        return
+    await callback.answer()
+    header = f"📄 **{r['label']}**\n\n"
+    for part in llm_router.split_for_telegram(header + r["result"]):
+        await callback.message.answer(part, parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("variants_refresh:"))
+async def cb_variants_refresh(callback: CallbackQuery, state: FSMContext) -> None:
+    task_id = callback.data.split(":")[1]
+    await state.update_data(refresh_task_id=task_id, refresh_msg_id=callback.message.message_id)
+    await callback.answer()
+    await callback.message.answer("Введите комментарий для уточнения анализа (например: «сфокусируйся на технической части»):")
+    await state.set_state(VariantRefreshState.waiting_comment)
+
+
+@router.message(VariantRefreshState.waiting_comment)
+async def cb_variants_refresh_comment(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    task_id = data.get("refresh_task_id")
+    await state.clear()
+
+    task_data = _tasks.get(task_id)
+    if not task_data:
+        await message.answer("Задача не найдена. Отправьте ссылку заново.")
+        return
+
+    task: MediaTask = task_data["task"]
+    text: str = task_data.get("transcript", "")
+    comment = message.text or ""
+
+    status = await message.answer("🤔 Генерирую новые варианты...")
+    new_variants = await llm_router.get_analysis_variants(text, extra_prompt=comment)
+
+    # Дополняем существующие варианты новыми (не заменяем)
+    existing = task_data.get("variants", [])
+    max_idx = max((v["idx"] for v in existing), default=0)
+    for i, v in enumerate(new_variants, 1):
+        v["idx"] = max_idx + i
+    all_variants = existing + new_variants
+    task_data["variants"] = all_variants
+
+    entry = task_data.get("history_entry")
+    if entry:
+        history.save_variants(entry.id, all_variants)
+
+    past_results = history.get_analysis_results(entry.id) if entry else []
+    keyboard = get_analysis_menu_keyboard(task_id, all_variants, past_results)
+    await status.edit_text(
+        f"🎯 **{task.title}**\n\nВыберите тип анализа:",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(F.data.startswith("analyze_run:"))
+async def cb_llm_analyze(callback: CallbackQuery) -> None:
+    parts = callback.data.split(":")
+    task_id, slot_idx = parts[1], int(parts[2])
+    task_data = _tasks.get(task_id)
+    if not task_data:
+        await callback.answer("❌ Задача не найдена.", show_alert=True)
+        return
+
+    task: MediaTask = task_data["task"]
+    text: str = task_data.get("transcript", "")
+    variants: list[dict] = task_data.get("variants", [{"idx": 1, "label": "Саммари", "prompt": "Сделай структурированное саммари видео: ключевые тезисы, неочевидные инсайты, итоговый вывод."}])
+
+    chosen = next((v for v in variants if v["idx"] == slot_idx), variants[0])
+    await callback.answer()
+
+    prefix_llm = f"🧠 **{chosen['label']}**: {task.title}"
+    await callback.message.edit_text(f"{prefix_llm}\n{len(text)} символов...", parse_mode="Markdown")
+
+    done_llm = asyncio.Event()
+    ticker_llm = asyncio.create_task(
+        _ticker(callback, prefix_llm, total_sec=None, done_event=done_llm)
+    )
     try:
-        result = await llm_router.analyze(text)
+        result = await llm_router.analyze(text, user_prompt=chosen["prompt"])
     except (ServiceDisabledError, LLMError) as e:
         await callback.message.edit_text(f"❌ {e.message}", parse_mode=None)
         return
@@ -418,42 +654,57 @@ async def cb_llm_analyze(callback: CallbackQuery) -> None:
         logger.error(f"LLM analyze error: {e}")
         await callback.message.edit_text("❌ Ошибка при AI-анализе.")
         return
+    finally:
+        done_llm.set()
+        ticker_llm.cancel()
 
-    # --- Отправка результата ---
-    header = f"🧠 **AI Саммари: {task.title}**\n\n"
-    parts = llm_router.split_for_telegram(header + result)
-
-    for part in parts:
+    header = f"🧠 **{chosen['label']}: {task.title}**\n\n"
+    for part in llm_router.split_for_telegram(header + result):
         await callback.message.answer(part, parse_mode="Markdown")
 
-    # --- Автосохранение саммари на GDrive ---
     gdrive_md_url: str | None = None
     if ENABLE_GDRIVE:
         try:
             from utils.md_generator import generate_transcript_md
-            # Сохраняем саммари (транскрипт + саммари вместе)
-            combined = f"{text}\n\n---\n\n## AI Саммари\n\n{result}"
+            combined = f"{text}\n\n---\n\n## {chosen['label']}\n\n{result}"
             md_path = generate_transcript_md(task, combined)
             gdrive_result = await gdrive.upload_transcript(md_path)
             gdrive_md_url = gdrive_result.public_url
             md_path.unlink(missing_ok=True)
         except Exception as e:
-            logger.warning(f"Автосохранение саммари на GDrive: {e}")
+            logger.warning(f"Автосохранение анализа на GDrive: {e}")
 
-    # Обновляем исходное сообщение
+    if task_data.get("transcript"):
+        try:
+            entry = task_data.get("history_entry") or history.get_by_video_id(callback.from_user.id, task.video_id)
+            if not entry and gdrive_md_url:
+                entry = history.get(history.add(callback.from_user.id, task, gdrive_md_url, task_data["transcript"]))
+                task_data["history_entry"] = entry
+            if entry:
+                result_id = history.save_analysis_result(entry.id, chosen["label"], chosen["prompt"], result)
+                history.append_llm_result(entry, chosen["label"], chosen["prompt"], result)
+                # Синхронизируем обновлённый .md на GDrive
+                if ENABLE_GDRIVE:
+                    try:
+                        updated_md = Path(entry.md_path)
+                        if updated_md.exists():
+                            gdrive_sync = await gdrive.upload_transcript(updated_md)
+                            history.update_gdrive_url(entry.id, gdrive_sync.public_url)
+                            gdrive_md_url = gdrive_sync.public_url
+                    except Exception as e:
+                        logger.warning(f"GDrive sync error: {e}")
+        except Exception as e:
+            logger.warning(f"History update error: {e}")
+
     status_lines = [
-        f"✅ AI-анализ завершён: **{task.title}**",
-        f"📝 Транскрипт: {len(text)} символов",
-        f"🧠 Ответ: {len(result)} символов",
+        f"✅ **{chosen['label']}** завершён: **{task.title}**",
+        f"📝 {len(text)} символов • 🧠 {len(result)} символов",
     ]
     if gdrive_md_url:
         status_lines.append(f"☁️ [Документ на GDrive]({gdrive_md_url})")
 
     await callback.message.edit_text(
-        "\n".join(status_lines),
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
+        "\n".join(status_lines), parse_mode="Markdown", disable_web_page_preview=True,
     )
-
-    logger.info(f"LLM analyze complete: {task.title} ({len(result)} chars), GDrive: {'OK' if gdrive_md_url else 'SKIP'}")
+    logger.info(f"LLM analyze complete [{chosen['label']}]: {task.title}")
 

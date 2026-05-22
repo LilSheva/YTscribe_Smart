@@ -1,60 +1,83 @@
 # YTS_bot (YouTube Station Bot)
-Локальный Telegram-бот для парсинга, скачивания медиа (yt-dlp), умной транскрибации (Whisper) и семантического анализа (ChromaDB). 
-Разработка ведется удаленно (через Web IDE), запуск и тестирование — локально. 
+Локальный Telegram-бот для парсинга, скачивания медиа (yt-dlp), умной транскрибации (Whisper) и AI-анализа (OmniRoute → Claude).
+Разработка ведётся удалённо (через Web IDE), запуск и тестирование — локально.
 Ключевая особенность: строгая модульность и Feature Toggles (отключение любого модуля без падения системы).
 
-## Стек
-- **Язык:** Python 3.11+ (строгая асинхронность)
-- **Бот:** `aiogram` 3.x (роутеры, FSM, Inline-меню)
-- **Медиа:** `yt-dlp` (метаданные, загрузка), `ffmpeg` (локальная нарезка)
-- **AI & LLM:** `groq` (Whisper API — основной), `httpx` (Omniroute — fallback транскрибации + LLM роутер)
-- **Хранилище:** `google-api-python-client` (GDrive — медиа + транскрипты), внешняя KB (API, на будущее)
+## 1. Окружение и стек
+- **Язык:** Python 3.12 (строгая асинхронность)
+- **Бот:** `aiogram` 3.x (роутеры, FSM, Inline-меню, ReplyKeyboard)
+- **Медиа:** `yt-dlp` + bgutil POT-провайдер (HTTP, `[::1]:4416`), `ffmpeg` (нарезка)
+- **AI & LLM:** `groq` (Whisper API — основной), `httpx` (OmniRoute/OpenRouter — LLM роутер, `stream=False`)
+- **Хранилище:** SQLite (`data/history.db`), `google-api-python-client` (GDrive — медиа + транскрипты)
 
-## Структура проекта
-- `main.py` — Точка входа бота.
-- `run_tests.py` — Скрипт диагностики окружения (API ключи, ffmpeg, права).
-- `core/` — Фундамент:
-  - `config.py` — Парсинг `.env` (включая флаги `ENABLE_...`).
-  - `logger.py` — Настройка логгирования.
-- `bot/` — UI слой (Telegram):
-  - `handlers/` — Обработка команд.
-  - `keyboards/` — Динамические меню (зависят от Feature Toggles).
-- `services/` — Слой бизнес-логики:
-  - `downloader.py` (yt-dlp), `transcriber.py` (Groq), `llm_router.py` (Omniroute), `gdrive.py` (GDrive upload).
-- `utils/` — Хелперы (генерация MD, чанкинг текста).
+## 2. Команды запуска
+1. Запустить POT-сервер: `cd C:\Users\yakov\bgutil-ytdlp-pot-provider\server && deno run --allow-all src/main.ts`
+2. Запустить бота: `python main.py`
+> Нельзя запускать два экземпляра бота одновременно — TelegramConflictError.
 
-## Ключевые сущности (Data Models)
-- `MediaTask`: url, title, duration_sec, temp_file_path.
-- `FeatureConfig`: Статус модулей (DOWNLOADER, TRANSCRIPT, LLM, KB, GDRIVE).
+## 3. Структура проекта
+→ см. `README.md` (полный список файлов и назначений)
 
-## Правила написания кода (Strict Rules)
-1. **Feature Toggles:** Вся функциональность зависит от флагов в `config.py` (например, `config.ENABLE_TRANSCRIPT`). Если флаг `False`, кнопки этого модуля **не должны** рендериться в клавиатурах, а вызовы функций должны возвращать ошибку/заглушку.
-2. **Изоляция сбоев (Resilience):** Падение одного модуля (например, API Groq лежит) не должно крашить бота. Ошибка перехватывается, логгируется, юзеру выдается сообщение, бот продолжает работать.
-3. **Без `print()`:** Использовать только встроенный `logging` (`logger = logging.getLogger(__name__)`).
-4. **Строгая типизация:** Обязательны Type Hints для всех аргументов и возвращаемых значений (`-> None`, `-> str` и т.д.).
-5. **Никакой блокировки Event Loop:** Любые синхронные вызовы (`yt-dlp`, IO диска, `ffmpeg`) оборачивать в `asyncio.to_thread()`.
+Ключевые точки входа:
+- `main.py` — точка входа, whitelist middleware, init_db
+- `core/config.py` — Feature Toggles, ALLOWED_USER_IDS, DATA_DIR
+- `bot/handlers/url_handler.py` — основной хэндлер + FSM
+- `services/` — вся бизнес-логика (downloader, transcriber, llm_router, gdrive, history)
 
-## Паттерны (Examples)
+## 4. Ключевые сущности
+- `MediaTask`: url, title, duration_sec, video_id, temp_file_path и метаданные.
+- `HistoryEntry`: id, user_id, video_id, title, gdrive_url, md_path.
+- `_tasks: dict[str, dict]` в url_handler — RAM-хранилище активных задач (теряется при рестарте).
 
-### Паттерн динамической клавиатуры с учетом флагов (Feature Toggles)
+## 5. Стандарты кодирования (Strict Rules)
+1. **Feature Toggles:** Флаги в `config.py` (`ENABLE_TRANSCRIPT` и др.). Если `False` — кнопки не рендерятся, вызовы возвращают заглушку.
+2. **Изоляция сбоев:** Падение модуля не крашит бота. Ошибка перехватывается, логгируется, юзеру — сообщение.
+3. **Без `print()`:** Только `logging.getLogger(__name__)`.
+4. **Строгая типизация:** Type Hints обязательны везде.
+5. **Никакой блокировки Event Loop:** Синхронные вызовы (yt-dlp, IO, ffmpeg) — через `asyncio.to_thread()`.
+6. **ENABLE_KB не трогать:** Задел на будущее (RAG через Colab). Не путать с историей транскриптов.
+
+## 6. Контроль архитектуры (Динамический триггер)
+При старте каждой сессии провести быструю оценку размера проекта (LoC) и проверить соответствие структуры:
+- **Микро (<500 LoC):** Только `CLAUDE.md`.
+- **Малый (500–2k LoC):** `CLAUDE.md` + `CURRENT_STAGE.md`.
+- **Средний (2k–10k LoC):** `CLAUDE.md` + `CURRENT_STAGE.md` + `docs/architecture.md`.
+- **Большой (>10k LoC):** Все выше + модульные инструкции в `.claude/docs/`.
+
+Если проект перерастает текущую категорию — сообщить первым сообщением и предложить рефакторинг документации.
+
+## 7. Паттерны (Examples)
+
+### Динамическая клавиатура с Feature Toggles
 ```python
-def get_media_keyboard() -> InlineKeyboardMarkup:
+def get_media_keyboard(task_id: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    if config.ENABLE_DOWNLOADER:
-        builder.button(text="🎵 MP3", callback_data="dl_mp3")
-    if config.ENABLE_TRANSCRIPT:
-        builder.button(text="📝 Текст", callback_data="get_transcript")
+    if features.downloader:
+        builder.button(text="🎵 M4A", callback_data=f"dl_m4a:{task_id}")
+    if features.transcript:
+        builder.button(text="📝 Транскрибировать", callback_data=f"transcript:{task_id}")
+    builder.adjust(2)
     return builder.as_markup()
 ```
 
-### Паттерн безопасного вызова блокирующей функции
+### Безопасный вызов блокирующей функции
 ```python
 try:
-    if not config.ENABLE_DOWNLOADER:
-        raise ValueError("Модуль загрузчика отключен.")
-    # Обертка блокирующего вызова
+    if not ENABLE_DOWNLOADER:
+        raise ServiceDisabledError("DOWNLOADER")
     file_path = await asyncio.to_thread(yt_service.download, url)
 except Exception as e:
     logger.error(f"Download error: {e}")
-    await message.answer(f"❌ Ошибка: {str(e)}")
+    await message.answer(f"❌ Ошибка: {e}")
+```
+
+### Прогресс-тикер
+```python
+done = asyncio.Event()
+ticker = asyncio.create_task(_ticker(callback, "⬇️ Скачиваю...", total_sec=30.0, done_event=done))
+try:
+    result = await long_operation()
+finally:
+    done.set()
+    ticker.cancel()
 ```

@@ -8,12 +8,15 @@ import asyncio
 import logging
 import time
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import TelegramObject, Update
 
-from core.config import BOT_TOKEN, TEMP_DIR, LOG_LEVEL
+from core.config import BOT_TOKEN, TEMP_DIR, LOG_LEVEL, ALLOWED_USER_IDS
+from services.history import init_db
 from core.logger import setup_logging
 from bot.handlers.start import router as start_router
 from bot.handlers.url_handler import router as url_router
@@ -60,6 +63,7 @@ def startup_cleanup(temp_dir: Path, max_age_sec: int = CLEANUP_AGE_SECONDS) -> i
 
 async def on_startup(bot: Bot) -> None:
     """Действия при запуске бота."""
+    init_db()
     # Очистка temp/
     deleted = startup_cleanup(TEMP_DIR)
     if deleted:
@@ -92,6 +96,24 @@ async def main() -> None:
 
     # Dispatcher
     dp = Dispatcher()
+
+    # Whitelist middleware
+    if ALLOWED_USER_IDS:
+        class AllowlistMiddleware(BaseMiddleware):
+            async def __call__(self, handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]], event: TelegramObject, data: dict[str, Any]) -> Any:
+                update: Update = data.get("event_update") or event
+                user_id = None
+                if hasattr(update, "message") and update.message:
+                    user_id = update.message.from_user.id if update.message.from_user else None
+                elif hasattr(update, "callback_query") and update.callback_query:
+                    user_id = update.callback_query.from_user.id if update.callback_query.from_user else None
+                if user_id not in ALLOWED_USER_IDS:
+                    logger.warning(f"Blocked unauthorized user_id={user_id}")
+                    return
+                return await handler(event, data)
+
+        dp.update.outer_middleware(AllowlistMiddleware())
+        logger.info(f"Whitelist active: {ALLOWED_USER_IDS}")
 
     # Регистрация роутеров
     dp.include_router(start_router)

@@ -96,6 +96,7 @@ async def analyze(
     payload = {
         "model": model,
         "max_tokens": max_tokens,
+        "stream": False,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -189,3 +190,59 @@ def split_for_telegram(text: str, limit: int = TELEGRAM_MSG_LIMIT) -> list[str]:
         parts.append(current.strip())
 
     return parts
+
+
+# Промпт для мета-запроса — просим LLM предложить варианты анализа
+_META_PROMPT = """Проанализируй транскрипт видео и предложи ровно 4 варианта его обработки.
+Вариант 1 ВСЕГДА: название "Саммари с инсайтами и выводом", промпт "Сделай структурированное саммари: ключевые тезисы (5-7 пунктов), неочевидные инсайты, итоговый вывод одним абзацем."
+Варианты 2-4 — предложи сам исходя из содержания видео.
+
+Требования к названиям: 4-8 слов, конкретно описывают ЧТО будет в ответе (не просто "Анализ" а "Разбор бизнес-модели с плюсами и минусами").
+Требования к промптам: конкретная инструкция для LLM, 1-2 предложения.
+
+Ответь СТРОГО в формате (ничего лишнего до и после блока):
+===VARIANTS===
+1|<название 4-8 слов>|<промпт-инструкция>
+2|<название 4-8 слов>|<промпт-инструкция>
+3|<название 4-8 слов>|<промпт-инструкция>
+4|<название 4-8 слов>|<промпт-инструкция>
+===END==="""
+
+
+def parse_variants(response: str) -> list[dict] | None:
+    """Парсит варианты анализа из ответа LLM. Возвращает None если формат нарушен."""
+    import re
+    match = re.search(r"===VARIANTS===(.*?)===END===", response, re.DOTALL)
+    if not match:
+        return None
+    variants = []
+    for line in match.group(1).strip().splitlines():
+        parts = line.split("|", 2)
+        if len(parts) == 3 and parts[0].strip().isdigit():
+            variants.append({"idx": int(parts[0].strip()), "label": parts[1].strip(), "prompt": parts[2].strip()})
+    return variants if len(variants) == 4 else None
+
+
+FALLBACK_VARIANT = {"idx": 1, "label": "Саммари с инсайтами", "prompt": "Сделай структурированное саммари видео: ключевые тезисы, неочевидные инсайты, итоговый вывод."}
+
+
+async def get_analysis_variants(text: str, extra_prompt: str = "") -> list[dict]:
+    """Запрашивает у LLM варианты анализа. При ошибке возвращает [FALLBACK_VARIANT]."""
+    _check_enabled()
+    _validate_api_key()
+    prompt = _META_PROMPT
+    if extra_prompt:
+        prompt = f"{_META_PROMPT}\n\nДополнительное уточнение от пользователя: {extra_prompt}"
+    try:
+        raw = await analyze(
+            text=text[:8000],
+            user_prompt=prompt,
+            system_prompt="Ты помощник для анализа видеоконтента. Отвечай строго по формату.",
+            max_tokens=600,
+        )
+        variants = parse_variants(raw)
+        if variants:
+            return variants
+    except Exception as e:
+        logger.warning(f"get_analysis_variants failed: {e}")
+    return [FALLBACK_VARIANT]

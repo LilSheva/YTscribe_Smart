@@ -88,15 +88,18 @@ python run_tests.py
 
 ### 7. Запуск
 
-**Вариант A (рекомендуемый):** OmniRoute + бот одной командой:
+**Шаг 1 — POT-сервер** (нужен для обхода YouTube bot-detection):
 ```bash
-scripts\run_omniroute.bat
+cd C:\Users\yakov\bgutil-ytdlp-pot-provider\server
+deno run --allow-all src/main.ts
 ```
 
-**Вариант B:** Только бот (если OmniRoute уже запущен или не нужен):
+**Шаг 2 — Бот:**
 ```bash
 python main.py
 ```
+
+> Нельзя запускать два экземпляра бота одновременно — TelegramConflictError.
 
 ---
 

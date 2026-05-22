@@ -36,6 +36,11 @@ def _get_bool(key: str, default: bool = False) -> bool:
 
 # === Telegram ===
 BOT_TOKEN: str = _get_env("BOT_TOKEN")
+ALLOWED_USER_IDS: set[int] = {
+    int(uid.strip())
+    for uid in _get_env("ALLOWED_USER_IDS", "").split(",")
+    if uid.strip().isdigit()
+}
 
 # === API Keys ===
 GROQ_API_KEY: str = _get_env("GROQ_API_KEY")
@@ -63,6 +68,8 @@ ENABLE_LLM: bool = _get_bool("ENABLE_LLM", default=True)
 ENABLE_DB: bool = _get_bool("ENABLE_DB", default=False)
 ENABLE_KB: bool = _get_bool("ENABLE_KB", default=False)
 ENABLE_GDRIVE: bool = _get_bool("ENABLE_GDRIVE", default=True)
+ENABLE_HISTORY: bool = _get_bool("ENABLE_HISTORY", default=True)
+DATA_DIR: Path = BASE_DIR / "data"
 
 # === Knowledge Base (внешний сервис) ===
 KB_API_URL: str = _get_env("KB_API_URL")

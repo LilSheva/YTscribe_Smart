@@ -10,6 +10,7 @@ services/downloader.py — Асинхронный сервис загрузки 
 
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import yt_dlp
@@ -44,20 +45,34 @@ def _base_opts() -> dict:
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
-        # Используем клиенты с PO Token (web + mweb) для обхода bot detection.
-        # Плагин bgutil-ytdlp-pot-provider автоматически получит токен с локального POT сервера.
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "mweb"],
             },
+            # POT берём через HTTP-провайдер bgutil. IPv6, т.к. сервер биндится на [::]:4416
+            # и на Windows IPv6-сокет не принимает IPv4-подключения.
+            "youtubepot-bgutilhttp": {
+                "base_url": ["http://[::1]:4416"],
+            },
+            # Принудительно отключаем script-провайдеры: их is_available() запускает
+            # `deno run generate_once.ts --version` с таймаутом 15с, который висит
+            # и валит инициализацию ещё до вызова HTTP-провайдера.
+            "youtubepot-bgutilscript": {
+                "server_home": ["C:/nonexistent_pot_path"],
+            },
         },
     }
-    # Cookies: приоритет — файл cookies.txt, затем браузер
+    # Cookies: приоритет — браузер (свежие cookies), затем файл cookies.txt (fallback)
+    # Браузер ВСЕГДА в приоритете, даже если cookies.txt существует
     cookies_file = BASE_DIR / "cookies.txt"
-    if cookies_file.exists():
-        opts["cookiefile"] = str(cookies_file)
-    elif BROWSER_FOR_COOKIES:
+    if BROWSER_FOR_COOKIES:
         opts["cookiesfrombrowser"] = (BROWSER_FOR_COOKIES,)
+        logger.debug(f"Cookies: browser '{BROWSER_FOR_COOKIES}' (cookies.txt ignored)")
+    elif cookies_file.exists():
+        opts["cookiefile"] = str(cookies_file)
+        logger.debug("Cookies: file 'cookies.txt' (fallback)")
+    else:
+        logger.warning("Cookies: not configured (neither browser nor file)")
     return opts
 
 
@@ -83,7 +98,7 @@ def _extract_info(url: str) -> dict:
         raise DownloadError(url, f"Неожиданная ошибка: {e}") from e
 
 
-def _download_file(url: str, format_type: str) -> Path:
+def _download_file(url: str, format_type: str, on_progress: "Callable[[float], None] | None" = None) -> Path:
     """
     Синхронное скачивание файла (блокирующий вызов).
 
@@ -112,6 +127,17 @@ def _download_file(url: str, format_type: str) -> Path:
         "outtmpl": output_template,
         "skip_download": False,
     })
+
+    if on_progress:
+        def _hook(d: dict) -> None:
+            if d.get("status") == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate")
+                downloaded = d.get("downloaded_bytes", 0)
+                if total:
+                    on_progress(downloaded / total)
+            elif d.get("status") == "finished":
+                on_progress(1.0)
+        opts["progress_hooks"] = [_hook]
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -191,7 +217,7 @@ async def get_info(url: str) -> MediaTask:
     return task
 
 
-async def download_media(url: str, format_type: str = "m4a") -> MediaTask:
+async def download_media(url: str, format_type: str = "m4a", on_progress: Callable[[float], None] | None = None) -> MediaTask:
     """
     Асинхронно скачивает медиа-файл.
 
@@ -213,7 +239,7 @@ async def download_media(url: str, format_type: str = "m4a") -> MediaTask:
     task = await get_info(url)
 
     # Затем скачиваем
-    file_path = await asyncio.to_thread(_download_file, url, format_type)
+    file_path = await asyncio.to_thread(_download_file, url, format_type, on_progress)
     task.temp_file_path = file_path
 
     logger.info(f"Загрузка завершена: {file_path.name} ({task.file_size_mb:.1f} MB)")

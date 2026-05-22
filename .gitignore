@@ -1,0 +1,15 @@
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+data/
+credentials/
+cookies.txt
+old_cookies.txt
+old_2_cookies.txt
+client_secret_*.json
+temp/
+.claude/
+upd_template_for_claude.md
+upd_template_for_curent_stage.md
