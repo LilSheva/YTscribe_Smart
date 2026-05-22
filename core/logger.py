@@ -5,6 +5,7 @@ core/logger.py — Настройка логгирования для YTS_bot.
     logger = logging.getLogger(__name__)
 """
 
+import io
 import logging
 import sys
 from pathlib import Path
@@ -26,8 +27,9 @@ def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # --- Console handler ---
-    console_handler = logging.StreamHandler(sys.stdout)
+    # --- Console handler (UTF-8 на Windows чтобы эмодзи не крашили cp1251) ---
+    utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    console_handler = logging.StreamHandler(utf8_stdout)
     console_handler.setLevel(numeric_level)
     console_handler.setFormatter(formatter)
 

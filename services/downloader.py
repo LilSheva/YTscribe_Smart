@@ -45,6 +45,9 @@ def _base_opts() -> dict:
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
+        "retries": 10,
+        "fragment_retries": 10,
+        "socket_timeout": 30,
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "mweb"],
