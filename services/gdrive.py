@@ -14,6 +14,7 @@ services/gdrive.py — Сервис загрузки файлов на Google Dr
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -22,6 +23,7 @@ from core.config import (
     GDRIVE_CREDENTIALS_PATH,
     GDRIVE_MEDIA_FOLDER_ID,
     GDRIVE_TRANSCRIPTS_FOLDER_ID,
+    GDRIVE_MODE,
     BASE_DIR,
 )
 from core.exceptions import ServiceDisabledError, YTSBotError
@@ -33,6 +35,8 @@ TOKEN_PATH: Path = BASE_DIR / "credentials" / "token.json"
 
 # Скоупы доступа
 SCOPES: list[str] = ["https://www.googleapis.com/auth/drive.file"]
+
+GDRIVE_FILE_ID_RE = re.compile(r"/file/d/([^/]+)")
 
 
 class GDriveError(YTSBotError):
@@ -58,6 +62,34 @@ def _check_enabled() -> None:
         raise ServiceDisabledError("GDRIVE")
 
 
+def use_local_transcript_sync() -> bool:
+    """Транскрипты пишутся в папку Google Drive Desktop, без Drive API."""
+    return GDRIVE_MODE == "local"
+
+
+def use_api_transcript_sync() -> bool:
+    return ENABLE_GDRIVE and not use_local_transcript_sync()
+
+
+def _local_transcript_result(file_path: Path) -> GDriveResult:
+    if not file_path.exists():
+        raise GDriveError(f"Файл не найден: {file_path}")
+    size_mb = file_path.stat().st_size / (1024 * 1024)
+    resolved = str(file_path.resolve())
+    logger.info("Transcript in local Drive folder: %s (%.2f MB)", resolved, size_mb)
+    return GDriveResult(
+        file_name=file_path.name,
+        file_id="local",
+        public_url=resolved,
+        size_mb=size_mb,
+    )
+
+
+def _sync_transcript_local_sync(file_path: Path) -> GDriveResult:
+    _check_enabled()
+    return _local_transcript_result(file_path)
+
+
 def _get_service():
     """
     Создаёт и возвращает Google Drive API service.
@@ -81,6 +113,7 @@ def _get_service():
         from google_auth_oauthlib.flow import InstalledAppFlow
         from googleapiclient.discovery import build
         import httplib2
+        from google_auth_httplib2 import AuthorizedHttp
 
         creds = None
 
@@ -105,8 +138,8 @@ def _get_service():
             TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
             logger.info(f"GDrive: токен сохранён в {TOKEN_PATH}")
 
-        http = httplib2.Http(timeout=30)
-        return build("drive", "v3", credentials=creds, http=http, num_retries=2)
+        http = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
+        return build("drive", "v3", http=http, num_retries=2)
 
     except ImportError:
         raise GDriveError(
@@ -178,6 +211,66 @@ def _upload_file_sync(file_path: Path, folder_id: str) -> GDriveResult:
         raise GDriveError(f"Ошибка загрузки на GDrive: {e}") from e
 
 
+def extract_file_id(public_url: str) -> str | None:
+    """Извлекает file_id из публичной ссылки Google Drive."""
+    if not public_url:
+        return None
+    match = GDRIVE_FILE_ID_RE.search(public_url)
+    return match.group(1) if match else None
+
+
+def check_file_exists_sync(file_id: str) -> bool:
+    """True если файл существует на Drive и не в корзине."""
+    if not file_id:
+        return False
+    try:
+        service = _get_service()
+        meta = service.files().get(fileId=file_id, fields="id,trashed").execute()
+        return not meta.get("trashed", False)
+    except Exception as e:
+        logger.debug(f"GDrive file check failed for {file_id}: {e}")
+        return False
+
+
+def _update_file_sync(file_path: Path, file_id: str) -> GDriveResult:
+    """Обновляет содержимое существующего файла на Drive."""
+    if not file_path.exists():
+        raise GDriveError(f"Файл не найден: {file_path}")
+
+    try:
+        from googleapiclient.http import MediaFileUpload
+
+        service = _get_service()
+        media = MediaFileUpload(str(file_path), resumable=True)
+        service.files().update(
+            fileId=file_id,
+            media_body=media,
+            fields="id, name",
+        ).execute()
+
+        public_url = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+        size_mb = file_path.stat().st_size / (1024 * 1024)
+        logger.info(f"Обновлён на GDrive: {file_path.name} ({size_mb:.1f} MB)")
+        return GDriveResult(
+            file_name=file_path.name,
+            file_id=file_id,
+            public_url=public_url,
+            size_mb=size_mb,
+        )
+    except GDriveError:
+        raise
+    except Exception as e:
+        raise GDriveError(f"Ошибка обновления на GDrive: {e}") from e
+
+
+def upload_or_update_transcript_sync(file_path: Path, existing_url: str | None) -> GDriveResult:
+    """Обновляет файл на Drive по URL или загружает новый."""
+    file_id = extract_file_id(existing_url or "")
+    if file_id and check_file_exists_sync(file_id):
+        return _update_file_sync(file_path, file_id)
+    return _upload_file_sync(file_path, GDRIVE_TRANSCRIPTS_FOLDER_ID)
+
+
 # ===== PUBLIC ASYNC API =====
 
 
@@ -205,24 +298,26 @@ async def upload_media(file_path: Path) -> GDriveResult:
 
 async def upload_transcript(file_path: Path) -> GDriveResult:
     """
-    Асинхронно загружает транскрипт (.md) на Google Drive.
+    Асинхронно сохраняет/синхронизирует транскрипт (.md).
 
-    Файл попадает в папку GDRIVE_TRANSCRIPTS_FOLDER_ID.
-
-    Args:
-        file_path: Путь к .md файлу транскрипта.
-
-    Returns:
-        GDriveResult с публичной ссылкой.
-
-    Raises:
-        ServiceDisabledError: Если модуль отключён.
-        GDriveError: При ошибке загрузки.
+    local: файл уже в папке Drive Desktop.
+    api: загрузка через Drive API.
     """
     _check_enabled()
+    if use_local_transcript_sync():
+        return await asyncio.to_thread(_sync_transcript_local_sync, file_path)
     logger.info(f"Загрузка транскрипта на GDrive: {file_path.name}")
     result = await asyncio.to_thread(_upload_file_sync, file_path, GDRIVE_TRANSCRIPTS_FOLDER_ID)
     return result
+
+
+async def sync_transcript(file_path: Path, existing_url: str | None = None) -> GDriveResult:
+    """Обновляет транскрипт в хранилище (локальная папка или Drive API)."""
+    _check_enabled()
+    if use_local_transcript_sync():
+        return await asyncio.to_thread(_sync_transcript_local_sync, file_path)
+    logger.info(f"Синхронизация транскрипта на GDrive: {file_path.name}")
+    return await asyncio.to_thread(upload_or_update_transcript_sync, file_path, existing_url)
 
 
 # Обратная совместимость (для url_handler)
@@ -231,5 +326,8 @@ async def upload(file_path: Path) -> GDriveResult:
     _check_enabled()
     if file_path.suffix == ".md":
         return await upload_transcript(file_path)
-    else:
-        return await upload_media(file_path)
+    if use_local_transcript_sync():
+        raise GDriveError(
+            "Медиа в local-режиме: задайте GDRIVE_MODE=api для m4a/mp4 или загрузите вручную."
+        )
+    return await upload_media(file_path)

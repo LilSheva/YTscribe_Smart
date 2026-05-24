@@ -1,15 +1,61 @@
+# ═══════════════════════════════════════════════════════════════
+# YTscribe Smart — не коммитить секреты и runtime-данные
+# ═══════════════════════════════════════════════════════════════
+
+# ── Секреты и локальный конфиг ──
 .env
-venv/
-__pycache__/
-*.pyc
-*.pyo
-data/
+.env.*
+!.env.example
+
+# OAuth / API keys / tokens
 credentials/
+client_secret_*.json
+**/token.json
+*.pem
+*.key
+
+# Cookies (YouTube, yt-dlp)
 cookies.txt
+cookies*.txt
 old_cookies.txt
 old_2_cookies.txt
-client_secret_*.json
+
+# ── Runtime (БД, транскрипты, кеш, temp) ──
+data/
 temp/
+.run/
+*.pid
+
+# ── Python ──
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── IDE / OS / локальные заметки ──
 .claude/
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ── Логи (основные — в .run/, это на всякий случай) ──
+*.log
+
+# ── Удалённые локальные шаблоны ──
 upd_template_for_claude.md
 upd_template_for_curent_stage.md

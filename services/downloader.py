@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # Допустимые форматы (без конвертации)
 SUPPORTED_FORMATS: dict[str, str] = {
-    "m4a": "bestaudio[ext=m4a]/bestaudio",
-    "mp4": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    "m4a": "bestaudio[ext=m4a]/140/bestaudio[acodec^=mp4a]/bestaudio",
+    "mp4": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+140/best[ext=mp4]/18/best",
 }
 
 
@@ -122,12 +122,14 @@ def _download_file(url: str, format_type: str, on_progress: "Callable[[float], N
     })
 
     if on_progress:
+        on_progress(0.0)
+
         def _hook(d: dict) -> None:
             if d.get("status") == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate")
                 downloaded = d.get("downloaded_bytes", 0)
                 if total:
-                    on_progress(downloaded / total)
+                    on_progress(min(downloaded / total, 0.99))
             elif d.get("status") == "finished":
                 on_progress(1.0)
         opts["progress_hooks"] = [_hook]
@@ -181,7 +183,13 @@ async def get_info(url: str) -> MediaTask:
     _check_enabled()
     logger.debug(f"Запрос метаданных: {url}")
 
-    info = await asyncio.to_thread(_extract_info, url)
+    try:
+        info = await asyncio.wait_for(
+            asyncio.to_thread(_extract_info, url),
+            timeout=120.0,
+        )
+    except asyncio.TimeoutError:
+        raise DownloadError(url, "Таймаут получения метаданных (120 с)") from None
 
     task = MediaTask(
         url=url,
@@ -210,13 +218,19 @@ async def get_info(url: str) -> MediaTask:
     return task
 
 
-async def download_media(url: str, format_type: str = "m4a", on_progress: Callable[[float], None] | None = None) -> MediaTask:
+async def download_media(
+    url: str,
+    format_type: str = "m4a",
+    on_progress: Callable[[float], None] | None = None,
+    task: MediaTask | None = None,
+) -> MediaTask:
     """
     Асинхронно скачивает медиа-файл.
 
     Args:
         url: Ссылка на видео.
         format_type: Формат загрузки ("m4a" или "mp4").
+        task: Уже полученные метаданные — пропускает повторный get_info().
 
     Returns:
         MediaTask с заполненным temp_file_path.
@@ -226,12 +240,12 @@ async def download_media(url: str, format_type: str = "m4a", on_progress: Callab
         DownloadError: При ошибке скачивания.
     """
     _check_enabled()
-    logger.info(f"Начало загрузки [{format_type}]: {url}")
+    if task is None:
+        logger.info(f"Начало загрузки [{format_type}]: {url}")
+        task = await get_info(url)
+    else:
+        logger.info(f"Начало загрузки [{format_type}]: {task.title}")
 
-    # Сначала получаем метаданные
-    task = await get_info(url)
-
-    # Затем скачиваем
     file_path = await asyncio.to_thread(_download_file, url, format_type, on_progress)
     task.temp_file_path = file_path
 

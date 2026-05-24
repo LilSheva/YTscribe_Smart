@@ -31,11 +31,28 @@ DEFAULT_SYSTEM_PROMPT: str = (
     "Тебе предоставлен транскрипт видео с YouTube. "
     "Отвечай на русском языке, если не указано иное. "
     "Будь точен, структурирован и полезен. "
-    "Используй Markdown для форматирования (заголовки, списки, выделение)."
+    "Форматирование ответа: используй списки и подзаголовки ####. "
+    "НЕ используй в ответе заголовки # и ## — они зарезервированы структурой документа."
 )
 
 # Лимит Telegram-сообщения
 TELEGRAM_MSG_LIMIT: int = 4096
+
+# Пресеты LLM (id → подпись в настройках)
+PRESET_LLM_MODELS: dict[str, str] = {
+    "claude-3-5-sonnet-20241022": "Claude 3.5 Sonnet",
+    "anthropic/claude-sonnet-4": "Claude Sonnet 4",
+    "google/gemini-2.0-flash-001": "Gemini 2.0 Flash",
+    "openai/gpt-4o-mini": "GPT-4o Mini",
+}
+
+
+def get_available_models() -> dict[str, str]:
+    """Модели LLM для меню настроек (+ default из .env)."""
+    models = dict(PRESET_LLM_MODELS)
+    if LLM_MODEL not in models:
+        models[LLM_MODEL] = f"Default ({LLM_MODEL})"
+    return models
 
 
 def _check_enabled() -> None:
@@ -84,6 +101,17 @@ async def analyze(
     max_tokens = max_tokens or LLM_MAX_TOKENS
     system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
 
+    from services.llm_cache import get_cached, set_cached
+
+    cached = get_cached(
+        model=model,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        text=text,
+    )
+    if cached is not None:
+        return cached
+
     # Формируем сообщение пользователя: промпт + транскрипт
     user_message = (
         f"{user_prompt}\n\n"
@@ -120,8 +148,16 @@ async def analyze(
         if response.status_code == 200:
             data = response.json()
             result = data["choices"][0]["message"]["content"]
+            result = result.strip()
+            set_cached(
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                text=text,
+                result=result,
+            )
             logger.info(f"LLM ответ получен: {len(result)} символов")
-            return result.strip()
+            return result
         elif response.status_code == 413:
             raise LLMError(
                 "Текст слишком длинный для выбранной модели. "
@@ -194,7 +230,7 @@ def split_for_telegram(text: str, limit: int = TELEGRAM_MSG_LIMIT) -> list[str]:
 
 # Промпт для мета-запроса — просим LLM предложить варианты анализа
 _META_PROMPT = """Проанализируй транскрипт видео и предложи ровно 4 варианта его обработки.
-Вариант 1 ВСЕГДА: название "Саммари с инсайтами и выводом", промпт "Сделай структурированное саммари: ключевые тезисы (5-7 пунктов), неочевидные инсайты, итоговый вывод одним абзацем."
+Вариант 1 ВСЕГДА: название "Саммари с инсайтами и выводом", промпт "Сделай структурированное саммари. Подзаголовки только ####. 5-7 тезисов, инсайты, вывод. Не используй # и ##."
 Варианты 2-4 — предложи сам исходя из содержания видео.
 
 Требования к названиям: 4-8 слов, конкретно описывают ЧТО будет в ответе (не просто "Анализ" а "Разбор бизнес-модели с плюсами и минусами").
@@ -223,10 +259,26 @@ def parse_variants(response: str) -> list[dict] | None:
     return variants if len(variants) == 4 else None
 
 
-FALLBACK_VARIANT = {"idx": 1, "label": "Саммари с инсайтами", "prompt": "Сделай структурированное саммари видео: ключевые тезисы, неочевидные инсайты, итоговый вывод."}
+FALLBACK_VARIANT = {
+    "idx": 1,
+    "label": "Саммари с инсайтами и выводом",
+    "prompt": (
+        "Сделай структурированное саммари. "
+        "Подзаголовки только #### (например #### Ключевые тезисы, #### Инсайты, #### Вывод). "
+        "5-7 тезисов списком, неочевидные инсайты, итоговый вывод одним абзацем. "
+        "Не используй # и ##."
+    ),
+}
+
+AUTO_SUMMARY_LABEL: str = FALLBACK_VARIANT["label"]
+AUTO_SUMMARY_PROMPT: str = FALLBACK_VARIANT["prompt"]
 
 
-async def get_analysis_variants(text: str, extra_prompt: str = "") -> list[dict]:
+async def get_analysis_variants(
+    text: str,
+    extra_prompt: str = "",
+    model: str | None = None,
+) -> list[dict]:
     """Запрашивает у LLM варианты анализа. При ошибке возвращает [FALLBACK_VARIANT]."""
     _check_enabled()
     _validate_api_key()
@@ -239,6 +291,7 @@ async def get_analysis_variants(text: str, extra_prompt: str = "") -> list[dict]
             user_prompt=prompt,
             system_prompt="Ты помощник для анализа видеоконтента. Отвечай строго по формату.",
             max_tokens=600,
+            model=model,
         )
         variants = parse_variants(raw)
         if variants:

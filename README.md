@@ -25,6 +25,18 @@
 
 ## Первый запуск (Windows)
 
+### Быстрый путь
+
+```bat
+bot_service.bat start    :: POT + бот в фоне (без окон)
+bot_service.bat status   :: проверка
+bot_service.bat stop     :: остановка
+```
+
+Логи: `.run/yts_bot.log`, `.run/service.log`.
+
+Перед первым запуском:
+
 ### 1. Клонирование и зависимости
 
 ```bash
@@ -41,13 +53,11 @@ pip install -r requirements.txt
 
 Проверка: `ffmpeg -version`
 
-### 3. OmniRoute (AI Gateway)
+### 3. OmniRoute (LLM)
 
-```bash
-scripts\install_omniroute.bat
-```
+Запустите **OmniRoute Desktop** (порт по умолчанию `20128`, см. `.env`).
 
-Скрипт проверит Node.js и установит OmniRoute глобально.
+CLI-вариант (опционально): `scripts\install_omniroute.bat`
 
 ### 4. Настройка .env
 
@@ -88,18 +98,20 @@ python run_tests.py
 
 ### 7. Запуск
 
-**Шаг 1 — POT-сервер** (нужен для обхода YouTube bot-detection):
-```bash
-cd C:\Users\yakov\bgutil-ytdlp-pot-provider\server
-deno run --allow-all src/main.ts
+**POT-сервер** (для yt-dlp, если `ENABLE_DOWNLOADER=True`):
+
+- Путь: `POT_SERVER_DIR` в `.env` (bgutil-ytdlp-pot-provider)
+- Стартует автоматически через `bot_service.bat start`
+
+**Бот:**
+
+```bat
+bot_service.bat start
 ```
 
-**Шаг 2 — Бот:**
-```bash
-python main.py
-```
+Или вручную для отладки: `venv\Scripts\python.exe main.py`
 
-> Нельзя запускать два экземпляра бота одновременно — TelegramConflictError.
+> Нельзя запускать два экземпляра бота — TelegramConflictError.
 
 ---
 
@@ -109,8 +121,8 @@ python main.py
 2. Отправьте ссылку на YouTube-видео
 3. Бот покажет карточку с метаданными и кнопки:
    - **🎵 M4A / 🎬 MP4** — скачать → GDrive → ссылка в чат
-   - **📝 Транскрибировать** — аудио → Whisper → текст + .md на GDrive
-   - **🧠 AI Саммари** — транскрипт → Claude → структурированный анализ
+   - **📝 Транскрибировать** — аудио → Whisper → JSON + sync GDrive
+   - **🧠 AI** — транскрипт → LLM → анализ в JSON
 
 Команды:
 - `/start` — приветствие
@@ -121,16 +133,18 @@ python main.py
 
 ## Структура проекта
 
+Полная карта каталогов и «куда смотреть по задаче»: **`docs/PROJECT_STRUCTURE.md`**
+
 ```
 ├── main.py                  — Точка входа
+├── bot_service.bat          — Лаунчер (фоновый start/stop)
 ├── run_tests.py             — Диагностика окружения
-├── core/                    — Конфиг, логгер, модели, исключения
-├── bot/handlers/            — Telegram-хэндлеры (start, url_handler)
-├── bot/keyboards/           — Инлайн-клавиатуры (Feature Toggles)
-├── services/                — Бизнес-логика (downloader, transcriber, llm, gdrive)
-├── utils/                   — Хелперы (md_generator, media_chunker)
-├── scripts/                 — Bat-скрипты для Windows
-└── docs/                    — Архитектура и документация
+├── core/                    — config, logger, models
+├── bot/                     — handlers, ui, pipeline, keyboards
+├── services/                — downloader, transcriber, llm, gdrive, db
+├── utils/                   — json_format, url_parser, …
+├── scripts/                 — CLI + bot_service_menu.ps1
+└── docs/                    — architecture, JSON schema, structure
 ```
 
 ---
@@ -153,6 +167,8 @@ ENABLE_KB=False           # Внешняя база знаний (на буду�
 
 ## Документация
 
+- `docs/PROJECT_STRUCTURE.md` — **карта проекта** (старт для агента)
 - `CLAUDE.md` — правила написания кода (для ИИ-ассистентов)
 - `CURRENT_STAGE.md` — трекер задач и текущий статус
 - `docs/architecture.md` — архитектура, слои, потоки данных
+- `docs/json_schema_v1.md` — формат JSON-транскриптов

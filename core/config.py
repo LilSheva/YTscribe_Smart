@@ -56,6 +56,15 @@ WHISPER_MAX_FILE_MB: int = int(_get_env("WHISPER_MAX_FILE_MB", "25"))
 GDRIVE_CREDENTIALS_PATH: str = _get_env("GDRIVE_CREDENTIALS_PATH", "credentials/gdrive_service.json")
 GDRIVE_MEDIA_FOLDER_ID: str = _get_env("GDRIVE_MEDIA_FOLDER_ID")
 GDRIVE_TRANSCRIPTS_FOLDER_ID: str = _get_env("GDRIVE_TRANSCRIPTS_FOLDER_ID")
+# local = папка клиента Google Drive на ПК (синхронизация приложением); api = OAuth + Drive API
+GDRIVE_LOCAL_DIR_RAW: str = _get_env("GDRIVE_LOCAL_DIR", "")
+GDRIVE_LOCAL_DIR: Path | None = (
+    Path(GDRIVE_LOCAL_DIR_RAW).expanduser() if GDRIVE_LOCAL_DIR_RAW.strip() else None
+)
+GDRIVE_MODE: str = _get_env(
+    "GDRIVE_MODE",
+    "local" if GDRIVE_LOCAL_DIR else "api",
+).strip().lower()
 
 # === Media / Cookies ===
 TEMP_DIR: Path = BASE_DIR / _get_env("TEMP_DIR", "temp")
@@ -81,12 +90,27 @@ ENABLE_GDRIVE: bool = _get_bool("ENABLE_GDRIVE", default=True)
 ENABLE_HISTORY: bool = _get_bool("ENABLE_HISTORY", default=True)
 DATA_DIR: Path = BASE_DIR / "data"
 
+# === Predictive progress (timing stats) ===
+TIMING_MIN_SAMPLES: int = max(1, int(_get_env("TIMING_MIN_SAMPLES", "5")))
+TIMING_RECENT_K: int = max(1, int(_get_env("TIMING_RECENT_K", "10")))
+
+# === GDrive sync ===
+GDRIVE_SYNC_ON_START: bool = _get_bool("GDRIVE_SYNC_ON_START", default=False)
+GDRIVE_SYNC_AUTO_REPAIR: bool = _get_bool("GDRIVE_SYNC_AUTO_REPAIR", default=False)
+
+# === Chat output toggles (global defaults; per-user overrides in SQLite) ===
+SHOW_TRANSCRIPT_IN_CHAT: bool = _get_bool("SHOW_TRANSCRIPT_IN_CHAT", default=False)
+SHOW_LLM_IN_CHAT: bool = _get_bool("SHOW_LLM_IN_CHAT", default=True)
+
 # === Knowledge Base (внешний сервис) ===
-KB_API_URL: str = _get_env("KB_API_URL")
+KB_API_URL: str = _get_env("KB_API_URL", "") if ENABLE_KB else os.getenv("KB_API_URL", "")
 
 # === LLM Settings ===
 LLM_MODEL: str = _get_env("LLM_MODEL", "claude-3-5-sonnet-20241022")
 LLM_MAX_TOKENS: int = int(_get_env("LLM_MAX_TOKENS", "4096"))
+AUTO_LLM_SUMMARY: bool = _get_bool("AUTO_LLM_SUMMARY", default=True)
+LLM_CACHE_ENABLED: bool = _get_bool("LLM_CACHE_ENABLED", default=True)
+LLM_CACHE_MAX_ENTRIES: int = max(50, int(_get_env("LLM_CACHE_MAX_ENTRIES", "500")))
 
 # === Logging ===
 LOG_LEVEL: str = _get_env("LOG_LEVEL", "INFO").upper()
@@ -99,7 +123,7 @@ class FeatureConfig:
     downloader: bool = ENABLE_DOWNLOADER
     transcript: bool = ENABLE_TRANSCRIPT
     llm: bool = ENABLE_LLM
-    db: bool = ENABLE_KB
+    db: bool = ENABLE_DB
     gdrive: bool = ENABLE_GDRIVE
 
     def summary(self) -> str:

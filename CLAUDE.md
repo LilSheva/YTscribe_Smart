@@ -11,23 +11,26 @@
 - **Хранилище:** SQLite (`data/history.db`), `google-api-python-client` (GDrive — медиа + транскрипты)
 
 ## 2. Команды запуска
-1. Запустить POT-сервер: `cd C:\Users\yakov\bgutil-ytdlp-pot-provider\server && deno run --allow-all src/main.ts`
-2. Запустить бота: `python main.py`
-> Нельзя запускать два экземпляра бота одновременно — TelegramConflictError.
+1. `bot_service.bat start` — POT (если нужен) + бот в фоне
+2. Логи: `.run/yts_bot.log`, `.run/service.log`
+3. Статус: `bot_service.bat status`
+
+> Нельзя запускать два экземпляра бота — TelegramConflictError.
 
 ## 3. Структура проекта
-→ см. `README.md` (полный список файлов и назначений)
+→ **`docs/PROJECT_STRUCTURE.md`** — полная карта (handlers, services, scripts)
 
 Ключевые точки входа:
 - `main.py` — точка входа, whitelist middleware, init_db
 - `core/config.py` — Feature Toggles, ALLOWED_USER_IDS, DATA_DIR
-- `bot/handlers/url_handler.py` — основной хэндлер + FSM
-- `services/` — вся бизнес-логика (downloader, transcriber, llm_router, gdrive, history)
+- `bot/handlers/url_handler.py` — YouTube URL, callbacks по video_id
+- `services/task_session.py` — rehydrate сессии после рестарта
+- `services/` — downloader, transcriber, llm_router, gdrive, db
 
 ## 4. Ключевые сущности
 - `MediaTask`: url, title, duration_sec, video_id, temp_file_path и метаданные.
-- `VideoEntry` + `ProcessingState` в `services/db.py` — основные записи БД (заменили `HistoryEntry`).
-- `_tasks: dict[str, dict]` в url_handler — RAM-хранилище активных задач (теряется при рестарте).
+- `VideoEntry` + `ProcessingState` в `services/db.py` — основные записи БД.
+- `services/task_session.py` — in-memory сессии по `video_id` (rehydrate из БД).
 - БД: таблицы `videos`, `processing_state`, `analysis_results`, `analysis_variants` в `data/history.db`.
 
 ## 5. Стандарты кодирования (Strict Rules)

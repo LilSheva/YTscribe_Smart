@@ -70,6 +70,26 @@ class AnalysisResult:
     created_at: str
 
 
+@dataclass
+class TimingSample:
+    stage_key: str
+    duration_sec: float
+    context: dict
+    created_at: str
+    id: int = 0
+
+
+@dataclass
+class UserSettingsRow:
+    user_id: int
+    show_transcript_in_chat: bool | None = None
+    show_llm_in_chat: bool | None = None
+    whisper_model: str | None = None
+    llm_model: str | None = None
+    transcribe_language: str | None = None
+    updated_at: str = ""
+
+
 # ─────────────────────────── connection ─────────────────────────────
 
 def _conn() -> sqlite3.Connection:
@@ -128,13 +148,46 @@ def init_db() -> None:
                 variants_json   TEXT NOT NULL,
                 created_at      TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS timing_samples (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                stage_key       TEXT    NOT NULL,
+                duration_sec    REAL    NOT NULL,
+                context_json    TEXT    NOT NULL DEFAULT '{}',
+                created_at      TEXT    NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_timing_stage_created
+                ON timing_samples(stage_key, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id                 INTEGER PRIMARY KEY,
+                show_transcript_in_chat INTEGER,
+                show_llm_in_chat        INTEGER,
+                whisper_model           TEXT,
+                llm_model               TEXT,
+                transcribe_language     TEXT,
+                updated_at              TEXT    NOT NULL
+            );
         """)
         _migrate(c)
+
+
+def _migrate_user_settings_columns(c: sqlite3.Connection) -> None:
+    cols = {r[1] for r in c.execute("PRAGMA table_info(user_settings)").fetchall()}
+    if "whisper_model" not in cols:
+        c.execute("ALTER TABLE user_settings ADD COLUMN whisper_model TEXT")
+    if "llm_model" not in cols:
+        c.execute("ALTER TABLE user_settings ADD COLUMN llm_model TEXT")
+    if "transcribe_language" not in cols:
+        c.execute("ALTER TABLE user_settings ADD COLUMN transcribe_language TEXT")
 
 
 def _migrate(c: sqlite3.Connection) -> None:
     """Переносит данные из старых таблиц в новую схему."""
     tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "user_settings" in tables:
+        _migrate_user_settings_columns(c)
 
     # Пересоздаём analysis_results если в ней старая колонка transcript_id
     if "analysis_results" in tables:
@@ -258,6 +311,28 @@ def get_video(video_id: str) -> VideoEntry | None:
     return _row_to_video(row) if row else None
 
 
+def video_entry_to_task(entry: VideoEntry, url: str | None = None) -> MediaTask:
+    """Собирает MediaTask из сохранённых метаданных (без вызова yt-dlp)."""
+    canonical_url = url or entry.url or f"https://www.youtube.com/watch?v={entry.video_id}"
+    return MediaTask(
+        url=canonical_url,
+        title=entry.title,
+        channel=entry.channel,
+        duration_sec=entry.duration_sec,
+        video_id=entry.video_id,
+        upload_date=entry.upload_date,
+        language=entry.language,
+    )
+
+
+def has_cached_metadata(video_id: str) -> VideoEntry | None:
+    """Запись с пригодными метаданными для карточки без yt-dlp, или None."""
+    entry = get_video(video_id)
+    if not entry or not entry.title or entry.title == "Неизвестно":
+        return None
+    return entry
+
+
 def list_videos(user_id: int, limit: int = 50) -> list[VideoEntry]:
     with _conn() as c:
         rows = c.execute(
@@ -265,6 +340,60 @@ def list_videos(user_id: int, limit: int = 50) -> list[VideoEntry]:
             (user_id, limit),
         ).fetchall()
     return [_row_to_video(r) for r in rows]
+
+
+def list_untranscribed_urls(user_id: int, limit: int = 200) -> list[str]:
+    """Канонические URL видео пользователя без готового транскрипта."""
+    from utils.url_parser import normalize_youtube_url
+
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT video_id, url FROM videos
+            WHERE added_by_user_id=?
+            ORDER BY added_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        video_id = row["video_id"]
+        if video_id in seen or has_transcript(video_id):
+            continue
+        seen.add(video_id)
+        canonical = normalize_youtube_url(row["url"]) or row["url"]
+        urls.append(canonical)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def list_videos_missing_summary(user_id: int | None = None, limit: int = 200) -> list[str]:
+    """video_id с транскриптом, но без AI-саммари."""
+    with _conn() as c:
+        if user_id is not None:
+            rows = c.execute(
+                """
+                SELECT s.video_id FROM processing_state s
+                JOIN videos v ON v.video_id = s.video_id
+                WHERE s.has_transcript = 1 AND s.has_summary = 0
+                  AND v.added_by_user_id = ?
+                ORDER BY v.added_at DESC LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                """
+                SELECT video_id FROM processing_state
+                WHERE has_transcript = 1 AND has_summary = 0
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    return [r["video_id"] for r in rows]
 
 
 # ─────────────────────────── processing_state ───────────────────────
@@ -320,38 +449,63 @@ def set_gdrive_synced_after_llm(video_id: str) -> None:
 
 # ─────────────────────────── transcript text ────────────────────────
 
+def _extract_transcript_body(content: str) -> str:
+    from utils.md_format import extract_transcript_body
+
+    return extract_transcript_body(content)
+
+
+def has_transcript(video_id: str) -> bool:
+    """True если транскрипт есть в БД и локальный файл доступен."""
+    return get_transcript_text(video_id) is not None
+
+
 def get_transcript_text(video_id: str) -> str | None:
+    from services.transcript_migrate import ensure_json_transcript
+    from services.transcript_paths import find_transcript_file
+    from utils.json_format import load_document
+
     state = get_state(video_id)
-    if not state or not state.transcript_path:
+    if not state or not state.has_transcript:
         return None
-    p = Path(state.transcript_path)
-    return p.read_text(encoding="utf-8") if p.exists() else None
+    ensure_json_transcript(video_id)
+    p = find_transcript_file(video_id)
+    if not p:
+        logger.warning(f"Transcript file missing for {video_id}")
+        return None
+    if p.suffix.lower() == ".json":
+        doc = load_document(p)
+        text = doc.get("transcript", {}).get("text", "")
+        return str(text).strip() or None
+    return _extract_transcript_body(p.read_text(encoding="utf-8"))
 
 
-def save_transcript_file(task: MediaTask, text: str) -> Path:
-    """Генерирует .md через md_generator, сохраняет в data/transcripts/, обновляет processing_state."""
-    from utils.md_generator import generate_transcript_md
-    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-    # md_generator пишет в TEMP_DIR; перемещаем в TRANSCRIPTS_DIR
-    tmp_path = generate_transcript_md(task, text)
-    safe = "".join(c for c in task.title if c not in '<>:"/\\|?*')[:80]
-    final_path = TRANSCRIPTS_DIR / f"{task.video_id}_{safe}.md"
-    tmp_path.replace(final_path)
-    set_transcript(task.video_id, str(final_path))
-    return final_path
+def save_transcript_file(
+    task: MediaTask,
+    text: str,
+    *,
+    added_by_user_id: int = 0,
+) -> Path:
+    """Создаёт JSON-транскрипт в каталоге хранения и обновляет processing_state."""
+    from services.transcript_json import create_transcript_json
+
+    return create_transcript_json(task, text, added_by_user_id=added_by_user_id)
 
 
-def append_llm_to_file(video_id: str, label: str, prompt: str, result: str) -> None:
-    """Дописывает LLM-ответ в .md файл транскрипта."""
-    state = get_state(video_id)
-    if not state or not state.transcript_path:
-        return
-    p = Path(state.transcript_path)
-    if not p.exists():
-        return
-    section = f"\n\n---\n\n## AI: {label}\n\n**Промпт:** {prompt}\n\n{result}\n"
-    with open(p, "a", encoding="utf-8") as f:
-        f.write(section)
+def append_llm_to_file(
+    video_id: str,
+    label: str,
+    prompt: str,
+    result: str,
+    *,
+    entry_id: int,
+    model: str | None = None,
+) -> bool:
+    from services.transcript_json import append_ai_analysis
+
+    return append_ai_analysis(
+        video_id, entry_id, label, prompt, result, model=model
+    )
 
 
 # ─────────────────────────── analysis_results ───────────────────────
@@ -380,6 +534,51 @@ def get_analysis_result(result_id: int) -> AnalysisResult | None:
     return AnalysisResult(**dict(row)) if row else None
 
 
+def count_ai_data() -> dict[str, int]:
+    """Статистика AI-данных для аудита перед сбросом."""
+    with _conn() as c:
+        results = c.execute("SELECT COUNT(*) FROM analysis_results").fetchone()[0]
+        variants = c.execute("SELECT COUNT(*) FROM analysis_variants").fetchone()[0]
+        with_summary = c.execute(
+            "SELECT COUNT(*) FROM processing_state WHERE has_transcript=1 AND has_summary=1"
+        ).fetchone()[0]
+        transcribed = c.execute(
+            "SELECT COUNT(*) FROM processing_state WHERE has_transcript=1"
+        ).fetchone()[0]
+    return {
+        "analysis_results": results,
+        "analysis_variants": variants,
+        "with_summary": with_summary,
+        "transcribed": transcribed,
+    }
+
+
+def reset_all_ai_data() -> dict[str, int]:
+    """
+    Удаляет все LLM-ответы и сбрасывает флаги.
+    Транскрипты, videos и processing_state.transcript_path не трогает.
+    """
+    before = count_ai_data()
+    with _conn() as c:
+        c.execute("DELETE FROM analysis_results")
+        c.execute("DELETE FROM analysis_variants")
+        c.execute("""
+            UPDATE processing_state SET
+                has_summary=0,
+                llm_call_count=0,
+                last_llm_prompt='',
+                last_llm_result_at='',
+                gdrive_updated_after_llm=0
+        """)
+    logger.info(
+        "AI reset: removed %s results, %s variants; %s transcribed videos reset",
+        before["analysis_results"],
+        before["analysis_variants"],
+        before["transcribed"],
+    )
+    return before
+
+
 # ─────────────────────────── analysis_variants ──────────────────────
 
 def save_variants(video_id: str, variants: list[dict]) -> None:
@@ -397,6 +596,167 @@ def get_variants(video_id: str) -> list[dict] | None:
             "SELECT variants_json FROM analysis_variants WHERE video_id=?", (video_id,)
         ).fetchone()
     return json.loads(row["variants_json"]) if row else None
+
+
+# ─────────────────────────── timing_samples ─────────────────────────
+
+def insert_timing_sample(stage_key: str, duration_sec: float, context: dict | None = None) -> None:
+    payload = json.dumps(context or {}, ensure_ascii=False)
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO timing_samples (stage_key, duration_sec, context_json, created_at) VALUES (?,?,?,?)",
+            (stage_key, float(duration_sec), payload, _now()),
+        )
+
+
+def count_timing_samples(stage_key: str) -> int:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT COUNT(*) AS cnt FROM timing_samples WHERE stage_key=?",
+            (stage_key,),
+        ).fetchone()
+    return int(row["cnt"]) if row else 0
+
+
+def get_timing_durations(stage_key: str, limit: int = 10) -> list[float]:
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT duration_sec FROM timing_samples
+            WHERE stage_key=?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (stage_key, limit),
+        ).fetchall()
+    return [float(r["duration_sec"]) for r in rows]
+
+
+def get_timing_samples(stage_key: str, limit: int = 10) -> list[TimingSample]:
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT id, stage_key, duration_sec, context_json, created_at
+            FROM timing_samples
+            WHERE stage_key=?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (stage_key, limit),
+        ).fetchall()
+    result: list[TimingSample] = []
+    for row in rows:
+        ctx = json.loads(row["context_json"] or "{}")
+        result.append(
+            TimingSample(
+                id=int(row["id"]),
+                stage_key=row["stage_key"],
+                duration_sec=float(row["duration_sec"]),
+                context=ctx,
+                created_at=row["created_at"],
+            )
+        )
+    return result
+
+
+# ─────────────────────────── user_settings ──────────────────────────
+
+def _nullable_bool(value: int | None) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
+
+
+def get_user_settings_row(user_id: int) -> UserSettingsRow | None:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT * FROM user_settings WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return UserSettingsRow(
+        user_id=int(row["user_id"]),
+        show_transcript_in_chat=_nullable_bool(row["show_transcript_in_chat"]),
+        show_llm_in_chat=_nullable_bool(row["show_llm_in_chat"]),
+        whisper_model=row["whisper_model"] or None,
+        llm_model=row["llm_model"] or None,
+        transcribe_language=row["transcribe_language"] or None,
+        updated_at=row["updated_at"] or "",
+    )
+
+
+def _pick_str(new: str | None, current: str | None) -> str | None:
+    return new if new is not None else current
+
+
+def upsert_user_settings(
+    user_id: int,
+    *,
+    show_transcript_in_chat: bool | None = ...,  # type: ignore[assignment]
+    show_llm_in_chat: bool | None = ...,  # type: ignore[assignment]
+    whisper_model: str | None = ...,
+    llm_model: str | None = ...,
+    transcribe_language: str | None = ...,
+    clear_all: bool = False,
+) -> UserSettingsRow:
+    current = get_user_settings_row(user_id)
+    if clear_all:
+        transcript = llm = None
+        whisper = llm_model_val = language = None
+    else:
+        transcript = (
+            show_transcript_in_chat
+            if show_transcript_in_chat is not ...
+            else (current.show_transcript_in_chat if current else None)
+        )
+        llm = (
+            show_llm_in_chat
+            if show_llm_in_chat is not ...
+            else (current.show_llm_in_chat if current else None)
+        )
+        whisper = (
+            whisper_model
+            if whisper_model is not ...
+            else (current.whisper_model if current else None)
+        )
+        llm_model_val = (
+            llm_model
+            if llm_model is not ...
+            else (current.llm_model if current else None)
+        )
+        language = (
+            transcribe_language
+            if transcribe_language is not ...
+            else (current.transcribe_language if current else None)
+        )
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO user_settings (
+                user_id, show_transcript_in_chat, show_llm_in_chat,
+                whisper_model, llm_model, transcribe_language, updated_at
+            )
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                show_transcript_in_chat=excluded.show_transcript_in_chat,
+                show_llm_in_chat=excluded.show_llm_in_chat,
+                whisper_model=excluded.whisper_model,
+                llm_model=excluded.llm_model,
+                transcribe_language=excluded.transcribe_language,
+                updated_at=excluded.updated_at
+            """,
+            (
+                user_id,
+                None if transcript is None else int(transcript),
+                None if llm is None else int(llm),
+                whisper,
+                llm_model_val,
+                language,
+                _now(),
+            ),
+        )
+    return get_user_settings_row(user_id) or UserSettingsRow(user_id=user_id)
 
 
 # ─────────────────────────── delete ─────────────────────────────────
@@ -420,7 +780,25 @@ def list_transcribed(limit: int = 200) -> list[dict]:
     with _conn() as c:
         rows = c.execute("""
             SELECT v.video_id, v.title, v.channel, v.duration_sec, v.added_at,
+                   v.added_by_user_id,
                    s.transcript_path, s.gdrive_transcript_url,
+                   s.has_summary, s.llm_call_count
+            FROM videos v
+            JOIN processing_state s ON s.video_id = v.video_id
+            WHERE s.has_transcript = 1
+            ORDER BY v.added_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_sync_records(limit: int = 500) -> list[dict]:
+    """Записи с транскриптом для аудита GDrive-синхронизации."""
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT v.video_id, v.title,
+                   s.transcript_path, s.gdrive_transcript_url,
+                   s.gdrive_transcript_synced_at, s.gdrive_updated_after_llm,
                    s.has_summary, s.llm_call_count
             FROM videos v
             JOIN processing_state s ON s.video_id = v.video_id

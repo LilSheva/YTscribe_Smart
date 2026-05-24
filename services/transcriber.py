@@ -12,6 +12,7 @@ services/transcriber.py — Сервис транскрибации аудио (
 
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,8 @@ from core.exceptions import ServiceDisabledError, TranscriptionError
 from utils.media_chunker import split_audio, cleanup_chunks
 
 logger = logging.getLogger(__name__)
+
+OnProgress = Callable[[str, str], None]
 
 # Доступные модели для выбора пользователем
 AVAILABLE_MODELS: dict[str, str] = {
@@ -74,6 +77,7 @@ async def _transcribe_single_file(
     file_path: Path,
     model: str,
     provider: str,
+    language: str = "auto",
 ) -> str:
     """
     Транскрибирует один аудиофайл через указанного провайдера.
@@ -105,11 +109,12 @@ async def _transcribe_single_file(
         async with httpx.AsyncClient(timeout=300.0) as client:
             with open(file_path, "rb") as audio_file:
                 files = {"file": (file_path.name, audio_file, "audio/mpeg")}
-                data = {
+                data: dict[str, str] = {
                     "model": model,
-                    "language": "ru",  # Авто-определение, подсказка для RU
                     "response_format": "text",
                 }
+                if language and language != "auto":
+                    data["language"] = language
                 headers = {"Authorization": f"Bearer {api_key}"}
 
                 response = await client.post(
@@ -142,6 +147,8 @@ async def _transcribe_single_file(
 async def _transcribe_with_fallback(
     file_path: Path,
     model: str,
+    language: str = "auto",
+    on_progress: OnProgress | None = None,
 ) -> str:
     """
     Транскрибирует файл с fallback: Groq → OmniRoute.
@@ -161,15 +168,22 @@ async def _transcribe_with_fallback(
 
     # Попытка 1: основной провайдер
     try:
+        if on_progress:
+            on_progress("api", f"{PROVIDERS[primary]['name']}: POST /audio/transcriptions")
         logger.info(f"Транскрибация через {PROVIDERS[primary]['name']}...")
-        return await _transcribe_single_file(file_path, model, primary)
+        return await _transcribe_single_file(file_path, model, primary, language)
     except TranscriptionError as e:
         logger.warning(f"Основной провайдер ({primary}) не сработал: {e.message}")
 
     # Попытка 2: fallback
     try:
+        if on_progress:
+            on_progress(
+                "api_fallback",
+                f"{PROVIDERS[fallback]['name']}: POST /audio/transcriptions",
+            )
         logger.info(f"Fallback: транскрибация через {PROVIDERS[fallback]['name']}...")
-        return await _transcribe_single_file(file_path, model, fallback)
+        return await _transcribe_single_file(file_path, model, fallback, language)
     except TranscriptionError as e:
         raise TranscriptionError(
             f"Оба провайдера недоступны. Последняя ошибка: {e.message}"
@@ -182,6 +196,8 @@ async def _transcribe_with_fallback(
 async def transcribe(
     file_path: Path,
     model: str | None = None,
+    language: str | None = None,
+    on_progress: OnProgress | None = None,
 ) -> str:
     """
     Асинхронно транскрибирует аудиофайл.
@@ -207,22 +223,32 @@ async def transcribe(
 
     if model is None:
         model = WHISPER_MODEL
+    lang = language or "auto"
 
     file_size_mb = file_path.stat().st_size / (1024 * 1024)
     logger.info(
         f"Начало транскрибации: {file_path.name} "
-        f"({file_size_mb:.1f} MB, model={model})"
+        f"({file_size_mb:.1f} MB, model={model}, lang={lang})"
     )
+
+    if on_progress:
+        lang_note = lang if lang != "auto" else "auto"
+        on_progress("prepare", f"Файл {file_size_mb:.1f} MB, {model}, язык {lang_note}")
 
     # Нарезка если нужно
     chunks = await split_audio(file_path)
+    if len(chunks) > 1 and on_progress:
+        on_progress("split", f"ffmpeg: {len(chunks)} частей")
 
     # Транскрибируем чанки
     texts: list[str] = []
+    total = len(chunks)
     for i, chunk in enumerate(chunks, 1):
+        if on_progress:
+            on_progress("chunk", f"Часть {i}/{total}: {chunk.name}")
         if len(chunks) > 1:
-            logger.info(f"Транскрибация чанка {i}/{len(chunks)}: {chunk.name}")
-        text = await _transcribe_with_fallback(chunk, model)
+            logger.info(f"Транскрибация чанка {i}/{total}: {chunk.name}")
+        text = await _transcribe_with_fallback(chunk, model, lang, on_progress=on_progress)
         texts.append(text)
 
     # Очистка чанков (если были)
